@@ -1,0 +1,42 @@
+[package]
+name = "yo"
+version = "1.0.0"
+edition = "2021"
+authors = ["Your Name <you@example.com>"]
+description = "A multi-functional command-line tool with GitHub SSH key management and SOCKS5 proxy"
+
+# 主程序
+[[bin]]
+name = "yo"
+path = "src/main.rs"
+
+[dependencies]
+# HTTP client for API requests (use rustls instead of openssl)
+reqwest = { version = "0.11", features = ["blocking", "json", "rustls-tls"], default-features = false }
+# JSON serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# Crypto dependencies (pure Rust, no OpenSSL)
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+sha2 = "0.10"
+rand = "0.8"
+base64 = "0.21"
+block-padding = "0.3"
+# Terminal colors
+colored = "2.0"
+# Regex support
+regex = "1.10"
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+# Network utilities
+socket2 = "0.5"
+# System utilities
+hostname = "0.3"
+chrono = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true

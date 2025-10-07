@@ -1,41 +1,35 @@
-# Prerequisites
-*.d
+# Rust
+/target/
+**/*.rs.bk
 
-# Compiled Object files
-*.slo
-*.lo
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+/build/
 *.o
-*.obj
-
-# Precompiled Headers
-*.gch
-*.pch
-
-# Linker files
-*.ilk
-
-# Debugger Files
-*.pdb
-
-# Compiled Dynamic libraries
+*.a
 *.so
 *.dylib
-*.dll
-
-# Fortran module files
-*.mod
-*.smod
-
-# Compiled Static libraries
-*.lai
-*.la
-*.a
-*.lib
-
-# Executables
 *.exe
 *.out
 *.app
 
-# debug information files
-*.dwo
+# C++ backup (已迁移到 bak/)
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+
+# Local configuration
+.yo/
+
+# Backup directory
+bak/
