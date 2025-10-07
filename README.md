@@ -129,20 +129,3 @@ cargo fmt
 # 生成文档
 cargo doc --open
 ```
-
-## 🤝 贡献
-
-欢迎提交 Issue 和 PR!
-
-## 📄 许可证
-
-MIT License
-
-## 🙏 致谢
-
-- 感谢 Rust 社区提供的优秀工具和库
-- 感谢 GOST 项目提供的 SOCKS5 代理实现
-
----
-
-**Made with 🦀 Rust**
