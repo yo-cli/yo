@@ -24,7 +24,7 @@ pub enum ConfigError {
 pub struct Task {
     /// 任务名称
     pub name: String,
-    /// 任务类型 (lockscreen_repeated, command 等)
+    /// 任务类型 (lockscreen_repeated, command, tts_command 等)
     pub task_type: String,
     /// 开始时间 (HH:MM 格式)
     pub start_time: String,
@@ -41,6 +41,15 @@ pub struct Task {
     /// 任务描述
     #[serde(default)]
     pub description: Option<String>,
+    /// TTS 文本内容
+    #[serde(default)]
+    pub tts_text: Option<String>,
+    /// TTS 语音模型/音色
+    #[serde(default)]
+    pub tts_voice: Option<String>,
+    /// TTS API Key
+    #[serde(default)]
+    pub tts_api_key: Option<String>,
 }
 
 fn default_enabled() -> bool {
@@ -64,6 +73,9 @@ impl Default for AutoConfig {
                 enabled: true,
                 command: None,
                 description: Some("Lock screen every 5 minutes from 22:00 to 06:00".to_string()),
+                tts_text: None,
+                tts_voice: None,
+                tts_api_key: None,
             }],
         }
     }

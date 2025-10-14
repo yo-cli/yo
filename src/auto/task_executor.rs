@@ -1,4 +1,6 @@
 use crate::auto::config::Task;
+use crate::auto::tts::VolcengineTtsClient;
+use chrono::Timelike;
 use colored::Colorize;
 use std::process::Command;
 use thiserror::Error;
@@ -11,6 +13,10 @@ pub enum ExecutorError {
     UnsupportedTaskType(String),
     #[error("Lock screen command not available on this platform")]
     LockScreenNotSupported,
+    #[error("TTS error: {0}")]
+    TtsError(String),
+    #[error("Missing required parameter: {0}")]
+    MissingParameter(String),
 }
 
 pub struct TaskExecutor;
@@ -34,6 +40,8 @@ impl TaskExecutor {
                     ))
                 }
             }
+            "tts_command" => Self::execute_tts(task),
+            "hourly_chime" => Self::execute_hourly_chime(task),
             _ => Err(ExecutorError::UnsupportedTaskType(task.task_type.clone())),
         }
     }
@@ -135,5 +143,68 @@ impl TaskExecutor {
             )),
             Err(e) => Err(ExecutorError::CommandFailed(format!("{}", e))),
         }
+    }
+
+    /// 执行 TTS 命令
+    fn execute_tts(task: &Task) -> Result<(), ExecutorError> {
+        // 验证必需参数
+        let text = task
+            .tts_text
+            .as_ref()
+            .ok_or_else(|| ExecutorError::MissingParameter("tts_text".to_string()))?;
+
+        let voice = task
+            .tts_voice
+            .as_ref()
+            .ok_or_else(|| ExecutorError::MissingParameter("tts_voice".to_string()))?;
+
+        let api_key = task
+            .tts_api_key
+            .as_ref()
+            .ok_or_else(|| ExecutorError::MissingParameter("tts_api_key".to_string()))?;
+
+        println!(
+            "{}",
+            format!("  🔊 TTS Text: \"{}\"", text).blue().bold()
+        );
+        println!(
+            "{}",
+            format!("  🎤 Voice: {}", voice).blue().bold()
+        );
+
+        // 创建 TTS 客户端并执行
+        let client = VolcengineTtsClient::new(api_key.clone());
+        client
+            .synthesize_and_play(text, voice)
+            .map_err(|e| ExecutorError::TtsError(format!("{}", e)))?;
+
+        println!("{}", "✓ TTS executed successfully".green().bold());
+        Ok(())
+    }
+
+    /// 执行整点报时
+    fn execute_hourly_chime(task: &Task) -> Result<(), ExecutorError> {
+        // 获取当前小时
+        let now = chrono::Local::now();
+        let hour = now.hour();
+
+        println!(
+            "{}",
+            format!("🕐 Hourly chime: {} o'clock", hour).cyan().bold()
+        );
+
+        // 获取 API Key
+        let api_key = task
+            .tts_api_key
+            .as_ref()
+            .ok_or_else(|| ExecutorError::MissingParameter("tts_api_key".to_string()))?;
+
+        // 创建 TTS 客户端并执行整点报时
+        let client = VolcengineTtsClient::new(api_key.clone());
+        client
+            .hourly_chime(hour)
+            .map_err(|e| ExecutorError::TtsError(format!("{}", e)))?;
+
+        Ok(())
     }
 }

@@ -35,6 +35,8 @@ socket2 = "0.5"
 # System utilities
 hostname = "0.3"
 chrono = "0.4"
+# Audio playback
+rodio = "0.17"
 
 [profile.release]
 opt-level = 3

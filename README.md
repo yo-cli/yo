@@ -129,6 +129,18 @@ yo run auto
       "enabled": true,
       "command": "notify-send 'Break Time' 'Take a 5-minute break!'",
       "description": "Hourly break reminder during work hours"
+    },
+    {
+      "name": "lunch_reminder_tts",
+      "task_type": "tts_command",
+      "start_time": "12:00",
+      "end_time": "12:01",
+      "interval_minutes": 1440,
+      "enabled": true,
+      "tts_text": "该吃午饭了",
+      "tts_voice": "zh_female_wanwanxiaohe_moon_bigtts",
+      "tts_api_key": "your-volcengine-api-key",
+      "description": "12:00 午餐提醒（湾湾小何音色）"
     }
   ]
 }
@@ -136,17 +148,21 @@ yo run auto
 
 **任务字段说明**:
 - `name`: 任务名称（唯一标识）
-- `task_type`: 任务类型（`lockscreen_repeated` 或 `command`）
+- `task_type`: 任务类型（`lockscreen_repeated`、`command` 或 `tts_command`）
 - `start_time`: 开始时间（HH:MM 格式）
 - `end_time`: 结束时间（HH:MM 格式，支持跨午夜）
 - `interval_minutes`: 执行间隔（分钟）
 - `enabled`: 是否启用任务
 - `command`: 自定义命令（仅 `command` 类型需要）
 - `description`: 任务描述（可选）
+- `tts_text`: 语音合成文本（仅 `tts_command` 类型需要）
+- `tts_voice`: 语音模型/音色（仅 `tts_command` 类型需要）
+- `tts_api_key`: 火山引擎 API Key（仅 `tts_command` 类型需要）
 
 **任务类型**:
 - `lockscreen_repeated`: 重复锁定屏幕（支持 Linux/macOS/Windows）
 - `command`: 执行自定义 shell 命令
+- `tts_command`: 文字转语音提醒（支持火山引擎 TTS API）
 
 **时间区间说明**:
 - 支持跨午夜时间段（如 22:00-06:00）
