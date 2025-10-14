@@ -18,6 +18,8 @@ pub enum SSHError {
     EmptyPublicKey,
     #[error("HOME environment variable not set")]
     HomeNotSet,
+    #[error("Permission error: {0}")]
+    PermissionError(String),
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
 }

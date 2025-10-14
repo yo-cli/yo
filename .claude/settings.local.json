@@ -11,7 +11,10 @@
       "Bash(pwsh:*)",
       "Bash(echo $HOME)",
       "Bash(cargo:*)",
-      "Bash(git config:*)"
+      "Bash(git config:*)",
+      "Bash(mkdir:*)",
+      "Read(//c/Users/DEV/.yo/**)",
+      "Bash(taskkill:*)"
     ],
     "deny": [],
     "ask": []
