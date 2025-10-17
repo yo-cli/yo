@@ -33,7 +33,11 @@
       "Bash(timeout:*)",
       "Bash(cmd /C start:*)",
       "Bash(cmd /C \"D:\\code\\ydcode\\yo\\voice\\last_tts.mp3\")",
-      "WebFetch(domain:quicksounds.com)"
+      "WebFetch(domain:quicksounds.com)",
+      "Bash(ls:*)",
+      "Bash(pkill:*)",
+      "Read(//c/Users/DEV/.claude/**)",
+      "Bash(target/release/examples/test_lockscreen_detection.exe)"
     ],
     "deny": [],
     "ask": []

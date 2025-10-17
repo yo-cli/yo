@@ -5,6 +5,9 @@ use std::fs;
 use std::path::PathBuf;
 use thiserror::Error;
 
+// 嵌入音频文件到二进制
+const HOUR_CHIME_AUDIO: &[u8] = include_bytes!("../../voice/clock/Hour_Chime_from_Clock.mp3");
+
 #[derive(Debug, Error)]
 pub enum TtsError {
     #[error("HTTP request failed: {0}")]
@@ -107,7 +110,7 @@ impl VolcengineTtsClient {
         let client = Client::new();
 
         // 生成唯一的 reqid
-        let reqid = format!("{}", chrono::Local::now().timestamp_nanos());
+        let reqid = format!("{}", chrono::Local::now().timestamp_nanos_opt().unwrap_or(0));
 
         // 构建请求参数（V1 API 格式）
         let request = TtsRequest {
@@ -175,7 +178,9 @@ impl VolcengineTtsClient {
             .as_ref()
             .ok_or_else(|| TtsError::ApiError("No audio data in response".to_string()))?;
 
-        let audio_data = base64::decode(audio_base64)
+        use base64::Engine as _;
+        let audio_data = base64::engine::general_purpose::STANDARD
+            .decode(audio_base64)
             .map_err(|e| TtsError::ApiError(format!("Failed to decode base64: {}", e)))?;
 
         // 保存音频文件
@@ -194,12 +199,8 @@ impl VolcengineTtsClient {
 
     /// 合成语音并播放
     pub fn synthesize_and_play(&self, text: &str, speaker: &str) -> Result<(), TtsError> {
-        // 保存到 voice 目录（用于调试和手动测试）
-        let voice_dir = PathBuf::from("voice");
-        if !voice_dir.exists() {
-            let _ = fs::create_dir(&voice_dir);
-        }
-
+        // 保存到用户配置目录
+        let voice_dir = Self::get_voice_dir()?;
         let permanent_file = voice_dir.join("last_tts.mp3");
 
         // 合成语音到文件
@@ -264,20 +265,53 @@ impl VolcengineTtsClient {
                 .bold()
         );
 
-        // 播放时钟报时声音
-        let chime_file = PathBuf::from("voice/clock/Hour_Chime_from_Clock.mp3");
+        // 播放时钟报时声音（从配置目录）
+        let voice_dir = Self::get_voice_dir()?;
+        let chime_file = voice_dir.join("clock").join("Hour_Chime_from_Clock.mp3");
+
         if chime_file.exists() {
             println!("{}", "  🔔 Playing hour chime...".cyan());
             Self::play_audio(&chime_file)?;
         } else {
             return Err(TtsError::PlayAudioFailed(format!(
-                "Hour chime file not found: {}",
+                "Hour chime file not found: {}\nPlease place the audio file at this location.",
                 chime_file.display()
             )));
         }
 
         println!("{}", "✓ Hourly chime completed".green().bold());
         Ok(())
+    }
+
+    /// 获取音频文件目录（~/.yo/voice/）
+    fn get_voice_dir() -> Result<PathBuf, TtsError> {
+        let home = std::env::var("USERPROFILE")
+            .or_else(|_| std::env::var("HOME"))
+            .map_err(|_| TtsError::PlayAudioFailed("Cannot find home directory".to_string()))?;
+
+        let voice_dir = PathBuf::from(home).join(".yo").join("voice");
+
+        // 确保目录存在
+        if !voice_dir.exists() {
+            fs::create_dir_all(&voice_dir)
+                .map_err(|e| TtsError::PlayAudioFailed(format!("Failed to create voice directory: {}", e)))?;
+        }
+
+        // 确保 clock 子目录存在
+        let clock_dir = voice_dir.join("clock");
+        if !clock_dir.exists() {
+            fs::create_dir_all(&clock_dir)
+                .map_err(|e| TtsError::PlayAudioFailed(format!("Failed to create clock directory: {}", e)))?;
+        }
+
+        // 如果时钟报时音频文件不存在，从嵌入的数据中提取（静默提取）
+        let chime_file = clock_dir.join("Hour_Chime_from_Clock.mp3");
+        if !chime_file.exists() {
+            fs::write(&chime_file, HOUR_CHIME_AUDIO)
+                .map_err(|e| TtsError::PlayAudioFailed(format!("Failed to extract hour chime audio: {}", e)))?;
+        }
+
+        Ok(voice_dir)
     }
 }
 

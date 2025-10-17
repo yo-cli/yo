@@ -50,6 +50,13 @@ pub struct Task {
     /// TTS API Key
     #[serde(default)]
     pub tts_api_key: Option<String>,
+    /// 自适应锁屏：最小间隔秒数（默认10秒）
+    #[serde(default = "default_min_interval_seconds")]
+    pub min_interval_seconds: u32,
+}
+
+fn default_min_interval_seconds() -> u32 {
+    10
 }
 
 fn default_enabled() -> bool {
@@ -68,14 +75,15 @@ impl Default for AutoConfig {
                 name: "night_lockscreen".to_string(),
                 task_type: "lockscreen_repeated".to_string(),
                 start_time: "22:00".to_string(),
-                end_time: "06:00".to_string(),
+                end_time: "05:00".to_string(),
                 interval_minutes: 5,
                 enabled: true,
                 command: None,
-                description: Some("Lock screen every 5 minutes from 22:00 to 06:00".to_string()),
+                description: Some("Lock screen every 5 minutes from 22:00 to 05:00".to_string()),
                 tts_text: None,
                 tts_voice: None,
                 tts_api_key: None,
+                min_interval_seconds: 10,
             }],
         }
     }

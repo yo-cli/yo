@@ -34,9 +34,22 @@ thiserror = "1.0"
 socket2 = "0.5"
 # System utilities
 hostname = "0.3"
-chrono = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
 # Audio playback
 rodio = "0.17"
+# Lazy static for global state
+lazy_static = "1.4"
+
+[target.'cfg(windows)'.dependencies]
+# Windows API for session monitoring
+windows = { version = "0.52", features = [
+    "Win32_System_RemoteDesktop",
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Diagnostics_ToolHelp"
+] }
 
 [profile.release]
 opt-level = 3

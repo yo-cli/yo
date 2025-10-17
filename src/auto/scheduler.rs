@@ -1,4 +1,6 @@
 use crate::auto::config::{AutoConfig, ConfigManager, Task};
+use crate::auto::lockscreen_monitor::LockscreenMonitor;
+use crate::auto::lockscreen_state::StateManager;
 use crate::auto::task_executor::TaskExecutor;
 use chrono::{Local, NaiveTime, Timelike};
 use colored::Colorize;
@@ -20,6 +22,8 @@ pub enum SchedulerError {
 pub struct TaskScheduler {
     config: AutoConfig,
     last_execution: HashMap<String, String>, // task_name -> last_execution_time (YYYY-MM-DD HH:MM)
+    adaptive_states: HashMap<String, StateManager>, // task_name -> StateManager (for adaptive_lockscreen tasks)
+    monitors: HashMap<String, LockscreenMonitor>, // task_name -> Monitor (for adaptive_lockscreen tasks)
 }
 
 impl TaskScheduler {
@@ -28,9 +32,65 @@ impl TaskScheduler {
         let config = ConfigManager::load_config()
             .map_err(|e| SchedulerError::ConfigLoadError(format!("{}", e)))?;
 
+        let mut adaptive_states = HashMap::new();
+        let mut monitors = HashMap::new();
+
+        // 为所有 adaptive_lockscreen 任务初始化状态管理器和监控器
+        for task in &config.tasks {
+            if task.task_type == "adaptive_lockscreen" {
+                let initial_interval_seconds = task.interval_minutes * 60;
+                let min_interval_seconds = task.min_interval_seconds;
+
+                // 创建状态管理器
+                match StateManager::new(task.name.clone(), initial_interval_seconds) {
+                    Ok(state_manager) => {
+                        // 创建监控器
+                        let monitor = LockscreenMonitor::new(
+                            state_manager.get_state_arc(),
+                            min_interval_seconds,
+                        );
+
+                        // 启动监控
+                        if let Err(e) = monitor.start() {
+                            println!(
+                                "{}",
+                                format!(
+                                    "⚠ Failed to start monitor for task '{}': {}",
+                                    task.name, e
+                                )
+                                .yellow()
+                            );
+                        } else {
+                            println!(
+                                "{}",
+                                format!("✓ Monitor started for task '{}'", task.name)
+                                    .green()
+                                    .bold()
+                            );
+                        }
+
+                        adaptive_states.insert(task.name.clone(), state_manager);
+                        monitors.insert(task.name.clone(), monitor);
+                    }
+                    Err(e) => {
+                        println!(
+                            "{}",
+                            format!(
+                                "⚠ Failed to create state manager for task '{}': {}",
+                                task.name, e
+                            )
+                            .yellow()
+                        );
+                    }
+                }
+            }
+        }
+
         Ok(Self {
             config,
             last_execution: HashMap::new(),
+            adaptive_states,
+            monitors,
         })
     }
 
@@ -201,11 +261,63 @@ impl TaskScheduler {
             now_time >= start_time || now_time < end_time
         };
 
+        // 处理自适应锁屏任务的时间窗口
+        if task.task_type == "adaptive_lockscreen" {
+            if let Some(state_manager) = self.adaptive_states.get(&task.name) {
+                if in_time_range && !state_manager.is_in_time_window() {
+                    // 进入时间窗口
+                    state_manager.enter_time_window();
+                    println!(
+                        "{}",
+                        format!("🚪 Task '{}' entered time window", task.name)
+                            .cyan()
+                            .bold()
+                    );
+                } else if !in_time_range && state_manager.is_in_time_window() {
+                    // 离开时间窗口
+                    state_manager.exit_time_window(task.interval_minutes * 60);
+                    state_manager.save().ok();
+                    println!(
+                        "{}",
+                        format!("🚪 Task '{}' exited time window (state reset)", task.name)
+                            .cyan()
+                            .bold()
+                    );
+                }
+            }
+        }
+
         if !in_time_range {
             return false;
         }
 
-        // 检查是否到了执行间隔
+        // 对于自适应锁屏任务，使用动态间隔（秒）
+        if task.task_type == "adaptive_lockscreen" {
+            if let Some(state_manager) = self.adaptive_states.get(&task.name) {
+                // 检查距离上次执行是否超过当前间隔
+                if let Some(last_exec_time_str) = self.last_execution.get(&task.name) {
+                    if let Ok(last_exec_time) = chrono::NaiveDateTime::parse_from_str(
+                        last_exec_time_str,
+                        "%Y-%m-%d %H:%M:%S",
+                    ) {
+                        let now_datetime = Local::now().naive_local();
+                        let elapsed = (now_datetime - last_exec_time).num_seconds() as u32;
+                        let current_interval = state_manager.get_current_interval_seconds();
+
+                        if elapsed < current_interval {
+                            return false; // 还没到间隔时间
+                        }
+                    }
+                } else {
+                    // 首次执行
+                    return true;
+                }
+
+                return true;
+            }
+        }
+
+        // 原有逻辑：对于非自适应任务
         // 计算从开始时间到现在的分钟数
         let minutes_since_start = if now_time >= start_time {
             // 同一天
@@ -236,13 +348,32 @@ impl TaskScheduler {
     }
 
     /// 执行任务
-    fn execute_task(&mut self, task: &Task, now_str: String) {
+    fn execute_task(&mut self, task: &Task, _now_str: String) {
         println!(
             "{}",
             format!("⏰ [{}] Triggering task: {}", Local::now().format("%H:%M:%S"), task.name)
                 .yellow()
                 .bold()
         );
+
+        // 对于自适应锁屏任务，在执行前记录锁屏
+        if task.task_type == "adaptive_lockscreen" {
+            if let Some(state_manager) = self.adaptive_states.get(&task.name) {
+                state_manager.record_lock();
+                let current_interval = state_manager.get_current_interval_seconds();
+                println!(
+                    "{}",
+                    format!(
+                        "🔒 Current interval: {} seconds ({} min {} sec)",
+                        current_interval,
+                        current_interval / 60,
+                        current_interval % 60
+                    )
+                    .blue()
+                    .bold()
+                );
+            }
+        }
 
         match TaskExecutor::execute_task(task) {
             Ok(_) => {
@@ -252,7 +383,23 @@ impl TaskScheduler {
                         .green()
                         .bold()
                 );
-                self.last_execution.insert(task.name.clone(), now_str);
+
+                // 使用更精确的时间格式用于自适应任务
+                let now_precise = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+                self.last_execution.insert(task.name.clone(), now_precise);
+
+                // 对于自适应锁屏任务，保存状态
+                if task.task_type == "adaptive_lockscreen" {
+                    if let Some(state_manager) = self.adaptive_states.get(&task.name) {
+                        if let Err(e) = state_manager.save() {
+                            println!(
+                                "{}",
+                                format!("⚠ Failed to save state for task '{}': {}", task.name, e)
+                                    .yellow()
+                            );
+                        }
+                    }
+                }
             }
             Err(e) => {
                 println!(
