@@ -39,6 +39,10 @@ chrono = { version = "0.4", features = ["serde"] }
 rodio = "0.17"
 # Lazy static for global state
 lazy_static = "1.4"
+# Interactive prompts
+inquire = "0.7"
+# Directory walking
+walkdir = "2.4"
 
 [target.'cfg(windows)'.dependencies]
 # Windows API for session monitoring

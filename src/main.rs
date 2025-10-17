@@ -5,7 +5,7 @@ mod github;
 mod s5;
 
 use colored::Colorize;
-use commands::{AutoCommand, GitHubInitCommand, S5Command};
+use commands::{AutoCommand, CloneCommand, GitHubInitCommand, S5Command};
 use std::env;
 
 const VERSION: &str = "1.0.0";
@@ -20,6 +20,7 @@ fn show_usage() {
     println!("Options:");
     println!("  -v, --version        Show version information");
     println!("  run auto             Start task scheduler (runs continuously)");
+    println!("  run clone            Clone template with keyword replacement");
     println!("  run s5               Start SOCKS5 proxy (automatic mode)");
     println!("  run s5 -i            Start SOCKS5 proxy (interactive mode)");
     println!("  run s5 --interactive Start SOCKS5 proxy (interactive mode)");
@@ -45,6 +46,19 @@ fn main() {
     // 处理 run auto 命令
     if args.len() >= 3 && arg1 == "run" && args[2] == "auto" {
         match AutoCommand::execute() {
+            Ok(_) => {}
+            Err(e) => {
+                println!("{}", format!("✗ {}", e).red().bold());
+                std::process::exit(1);
+            }
+        }
+
+        return;
+    }
+
+    // 处理 run clone 命令
+    if args.len() >= 3 && arg1 == "run" && args[2] == "clone" {
+        match CloneCommand::execute() {
             Ok(_) => {}
             Err(e) => {
                 println!("{}", format!("✗ {}", e).red().bold());

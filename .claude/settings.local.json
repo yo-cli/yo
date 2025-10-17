@@ -37,7 +37,8 @@
       "Bash(ls:*)",
       "Bash(pkill:*)",
       "Read(//c/Users/DEV/.claude/**)",
-      "Bash(target/release/examples/test_lockscreen_detection.exe)"
+      "Bash(target/release/examples/test_lockscreen_detection.exe)",
+      "Bash(./target/release/yo.exe:*)"
     ],
     "deny": [],
     "ask": []
