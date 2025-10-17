@@ -7,7 +7,6 @@ cargo install --path .
 一个集成了 GitHub SSH 密钥管理、SOCKS5 代理和定时任务调度的多功能命令行工具。
 
 ## ✨ 特性
-
 - 🔐 **GitHub SSH 密钥管理** - 自动生成、配置和部署 SSH 密钥
 - 🌐 **SOCKS5 代理** - 基于 Docker 和 GOST 的一键代理服务
 - ⏰ **定时任务调度** - 常驻进程执行定时任务（锁屏、自定义命令等）
