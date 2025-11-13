@@ -45,7 +45,8 @@
       "Bash(ldd:*)",
       "Bash(pkg-config:*)",
       "Bash(/root/.cargo/bin/yo:*)",
-      "Bash(sudo cp:*)"
+      "Bash(sudo cp:*)",
+      "Bash(md5sum:*)"
     ],
     "deny": [],
     "ask": []

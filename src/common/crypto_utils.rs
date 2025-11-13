@@ -99,10 +99,10 @@ impl CryptoUtils {
         let mut iv = [0u8; AES_BLOCK_SIZE];
         rand::thread_rng().fill(&mut iv);
 
-        // 准备数据
+        // 准备数据 - 分配足够的空间用于填充（最多一个完整块）
         let plaintext_bytes = plaintext.as_bytes();
-        let mut buffer = Vec::with_capacity(plaintext_bytes.len() + AES_BLOCK_SIZE);
-        buffer.extend_from_slice(plaintext_bytes);
+        let mut buffer = vec![0u8; plaintext_bytes.len() + AES_BLOCK_SIZE];
+        buffer[..plaintext_bytes.len()].copy_from_slice(plaintext_bytes);
 
         // 加密
         let cipher = Aes256CbcEnc::new(key.into(), &iv.into());

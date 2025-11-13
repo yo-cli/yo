@@ -179,6 +179,12 @@ impl VolcengineTtsClient {
                 .bold()
         );
 
+        // 检测是否在 WSL 环境中
+        let is_wsl = std::path::Path::new("/proc/version").exists()
+            && std::fs::read_to_string("/proc/version")
+                .map(|s| s.to_lowercase().contains("microsoft") || s.to_lowercase().contains("wsl"))
+                .unwrap_or(false);
+
         #[cfg(target_os = "windows")]
         {
             use std::process::Command;
@@ -191,22 +197,33 @@ impl VolcengineTtsClient {
 
         #[cfg(not(target_os = "windows"))]
         {
-            use rodio::{Decoder, OutputStream, Sink};
-            use std::fs::File;
-            use std::io::BufReader;
+            // 在 WSL 中使用 Windows 命令播放
+            if is_wsl {
+                use std::process::Command;
+                let path_str = audio_path.to_string_lossy().to_string();
+                Command::new("cmd.exe")
+                    .args(&["/C", "start", "", &path_str])
+                    .spawn()
+                    .map_err(|e| TtsError::PlayAudioFailed(format!("{}", e)))?;
+            } else {
+                // 真实的 Linux 环境使用 rodio
+                use rodio::{Decoder, OutputStream, Sink};
+                use std::fs::File;
+                use std::io::BufReader;
 
-            let (_stream, stream_handle) = OutputStream::try_default()
-                .map_err(|e| TtsError::PlayAudioFailed(format!("{}", e)))?;
-            let sink = Sink::try_new(&stream_handle)
-                .map_err(|e| TtsError::PlayAudioFailed(format!("{}", e)))?;
+                let (_stream, stream_handle) = OutputStream::try_default()
+                    .map_err(|e| TtsError::PlayAudioFailed(format!("{}", e)))?;
+                let sink = Sink::try_new(&stream_handle)
+                    .map_err(|e| TtsError::PlayAudioFailed(format!("{}", e)))?;
 
-            let file = File::open(audio_path)
-                .map_err(|e| TtsError::PlayAudioFailed(format!("{}", e)))?;
-            let source = Decoder::new(BufReader::new(file))
-                .map_err(|e| TtsError::PlayAudioFailed(format!("{}", e)))?;
+                let file = File::open(audio_path)
+                    .map_err(|e| TtsError::PlayAudioFailed(format!("{}", e)))?;
+                let source = Decoder::new(BufReader::new(file))
+                    .map_err(|e| TtsError::PlayAudioFailed(format!("{}", e)))?;
 
-            sink.append(source);
-            sink.sleep_until_end();
+                sink.append(source);
+                sink.sleep_until_end();
+            }
         }
 
         println!("{}", "✓ Audio playback completed".green().bold());

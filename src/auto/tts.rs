@@ -216,44 +216,71 @@ impl VolcengineTtsClient {
 
     /// 播放音频文件 - 使用内嵌播放器（所有平台通用）
     pub fn play_audio(file_path: &PathBuf) -> Result<(), TtsError> {
-        use std::fs::File;
-        use std::io::BufReader;
-
         println!(
             "{}",
-            format!("  🔊 Playing audio with built-in player...")
+            format!("  🔊 Playing audio: {}", file_path.display())
                 .green()
                 .bold()
         );
 
-        // 打开音频文件
-        let file = File::open(file_path)
-            .map_err(|e| TtsError::PlayAudioFailed(format!("Failed to open file: {}", e)))?;
-        let source = BufReader::new(file);
+        // 检测是否在 WSL 环境中
+        let is_wsl = std::path::Path::new("/proc/version").exists()
+            && std::fs::read_to_string("/proc/version")
+                .map(|s| s.to_lowercase().contains("microsoft") || s.to_lowercase().contains("wsl"))
+                .unwrap_or(false);
 
-        // 初始化音频输出设备
-        let (_stream, stream_handle) = rodio::OutputStream::try_default()
-            .map_err(|e| TtsError::PlayAudioFailed(format!("Failed to get audio output: {}", e)))?;
+        // 在 WSL 或 Windows 中使用 Windows 命令播放
+        #[cfg(target_os = "windows")]
+        {
+            use std::process::Command;
+            let path_str = file_path.to_string_lossy().to_string();
+            Command::new("cmd")
+                .args(&["/C", "start", "", &path_str])
+                .spawn()
+                .map_err(|e| TtsError::PlayAudioFailed(format!("{}", e)))?;
 
-        // 创建音频 sink
-        let sink = rodio::Sink::try_new(&stream_handle)
-            .map_err(|e| TtsError::PlayAudioFailed(format!("Failed to create audio sink: {}", e)))?;
+            println!("{}", "  ✓ Audio playback started".green().bold());
+            return Ok(());
+        }
 
-        // 解码并添加音频到播放队列
-        let decoder = rodio::Decoder::new(source)
-            .map_err(|e| TtsError::PlayAudioFailed(format!("Failed to decode audio: {}", e)))?;
+        #[cfg(not(target_os = "windows"))]
+        {
+            // 在 WSL 中使用 Windows 命令播放
+            if is_wsl {
+                use std::process::Command;
+                let path_str = file_path.to_string_lossy().to_string();
+                Command::new("cmd.exe")
+                    .args(&["/C", "start", "", &path_str])
+                    .spawn()
+                    .map_err(|e| TtsError::PlayAudioFailed(format!("{}", e)))?;
 
-        sink.append(decoder);
+                println!("{}", "  ✓ Audio playback started".green().bold());
+                return Ok(());
+            }
 
-        // 等待播放完成
-        sink.sleep_until_end();
+            // 真实的 Linux 环境使用 rodio
+            use std::fs::File;
+            use std::io::BufReader;
 
-        println!(
-            "{}",
-            "  ✓ Audio playback completed".green().bold()
-        );
+            let file = File::open(file_path)
+                .map_err(|e| TtsError::PlayAudioFailed(format!("Failed to open file: {}", e)))?;
+            let source = BufReader::new(file);
 
-        Ok(())
+            let (_stream, stream_handle) = rodio::OutputStream::try_default()
+                .map_err(|e| TtsError::PlayAudioFailed(format!("Failed to get audio output: {}", e)))?;
+
+            let sink = rodio::Sink::try_new(&stream_handle)
+                .map_err(|e| TtsError::PlayAudioFailed(format!("Failed to create audio sink: {}", e)))?;
+
+            let decoder = rodio::Decoder::new(source)
+                .map_err(|e| TtsError::PlayAudioFailed(format!("Failed to decode audio: {}", e)))?;
+
+            sink.append(decoder);
+            sink.sleep_until_end();
+
+            println!("{}", "  ✓ Audio playback completed".green().bold());
+            Ok(())
+        }
     }
 
     /// 整点报时：播放时钟报时声音
