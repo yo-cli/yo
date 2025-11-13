@@ -24,6 +24,16 @@ pub enum CloneError {
     WalkDirError(#[from] walkdir::Error),
 }
 
+/// 字符类型
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CharType {
+    Upper,
+    Lower,
+    Digit,
+    Separator,
+    Other,
+}
+
 /// 关键词的所有变体形式
 #[derive(Debug, Clone)]
 struct KeywordVariants {
@@ -60,13 +70,77 @@ impl KeywordVariants {
 
     /// 解析输入字符串为单词列表
     fn parse_words(input: &str) -> Vec<String> {
-        // 处理不同的命名格式
-        let re = Regex::new(r"[-_\s]+|(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])").unwrap();
+        let mut words = Vec::new();
+        let mut current_word = String::new();
+        let mut prev_char_type = CharType::Other;
 
-        re.split(input)
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_lowercase())
-            .collect()
+        for ch in input.chars() {
+            let char_type = if ch.is_uppercase() {
+                CharType::Upper
+            } else if ch.is_lowercase() {
+                CharType::Lower
+            } else if ch.is_numeric() {
+                CharType::Digit
+            } else if ch == '-' || ch == '_' || ch.is_whitespace() {
+                CharType::Separator
+            } else {
+                CharType::Other
+            };
+
+            match char_type {
+                CharType::Separator => {
+                    // 遇到分隔符，保存当前单词
+                    if !current_word.is_empty() {
+                        words.push(current_word.to_lowercase());
+                        current_word.clear();
+                    }
+                }
+                CharType::Upper => {
+                    // 大写字母的处理
+                    match prev_char_type {
+                        CharType::Lower | CharType::Digit => {
+                            // 从小写/数字到大写：新单词开始 (myWord -> my, Word)
+                            if !current_word.is_empty() {
+                                words.push(current_word.to_lowercase());
+                                current_word.clear();
+                            }
+                            current_word.push(ch);
+                        }
+                        CharType::Upper => {
+                            // 连续大写字母 (HTTPServer)
+                            current_word.push(ch);
+                        }
+                        _ => {
+                            current_word.push(ch);
+                        }
+                    }
+                }
+                CharType::Lower | CharType::Digit => {
+                    // 小写字母或数字
+                    if prev_char_type == CharType::Upper && current_word.len() > 1 {
+                        // HTTPServer: HTTP 和 Server 分开
+                        // 将最后一个大写字母移到新单词
+                        let last_char = current_word.pop().unwrap();
+                        words.push(current_word.to_lowercase());
+                        current_word.clear();
+                        current_word.push(last_char);
+                    }
+                    current_word.push(ch);
+                }
+                CharType::Other => {
+                    current_word.push(ch);
+                }
+            }
+
+            prev_char_type = char_type;
+        }
+
+        // 保存最后一个单词
+        if !current_word.is_empty() {
+            words.push(current_word.to_lowercase());
+        }
+
+        words
     }
 
     /// 首字母大写
@@ -321,14 +395,72 @@ impl CloneCommand {
         replacements.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
 
         for (old, new) in replacements {
-            // 使用单词边界正则表达式
-            let pattern = format!(r"\b{}\b", regex::escape(old));
-            if let Ok(re) = Regex::new(&pattern) {
-                result = re.replace_all(&result, new.as_str()).to_string();
-            }
+            // 手动实现单词边界匹配（不使用 lookahead/lookbehind）
+            result = Self::replace_with_boundary(&result, old, new);
         }
 
         result
+    }
+
+    /// 在字符串中替换关键词，确保单词边界
+    /// 边界定义：分隔符（-_）、空白、或字符串边界
+    fn replace_with_boundary(content: &str, old: &str, new: &str) -> String {
+        let mut result = String::new();
+        let chars: Vec<char> = content.chars().collect();
+        let old_chars: Vec<char> = old.chars().collect();
+        let old_len = old_chars.len();
+        let content_len = chars.len();
+
+        let mut i = 0;
+        while i < content_len {
+            // 检查是否匹配
+            let mut matches = false;
+            if i + old_len <= content_len {
+                matches = true;
+                for j in 0..old_len {
+                    if chars[i + j] != old_chars[j] {
+                        matches = false;
+                        break;
+                    }
+                }
+            }
+
+            if matches {
+                // 检查前边界
+                let before_ok = if i == 0 {
+                    true
+                } else {
+                    let prev_char = chars[i - 1];
+                    Self::is_boundary_char(prev_char)
+                };
+
+                // 检查后边界
+                let after_ok = if i + old_len >= content_len {
+                    true
+                } else {
+                    let next_char = chars[i + old_len];
+                    Self::is_boundary_char(next_char)
+                };
+
+                if before_ok && after_ok {
+                    // 符合边界条件，执行替换
+                    result.push_str(new);
+                    i += old_len;
+                    continue;
+                }
+            }
+
+            // 不匹配或不符合边界，保留原字符
+            result.push(chars[i]);
+            i += 1;
+        }
+
+        result
+    }
+
+    /// 检查字符是否是边界字符
+    fn is_boundary_char(ch: char) -> bool {
+        ch == '-' || ch == '_' || ch.is_whitespace()
     }
 
     /// 在路径中替换关键词

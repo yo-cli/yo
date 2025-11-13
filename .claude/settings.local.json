@@ -38,7 +38,14 @@
       "Bash(pkill:*)",
       "Read(//c/Users/DEV/.claude/**)",
       "Bash(target/release/examples/test_lockscreen_detection.exe)",
-      "Bash(./target/release/yo.exe:*)"
+      "Bash(./target/release/yo.exe:*)",
+      "Read(//d/code/okrxyz/jarvis/project/jarvis-ai/jarvis-ai-plugins/standard-repository/standard-repository-core/**)",
+      "Bash(python -c:*)",
+      "Bash(git log:*)",
+      "Bash(ldd:*)",
+      "Bash(pkg-config:*)",
+      "Bash(/root/.cargo/bin/yo:*)",
+      "Bash(sudo cp:*)"
     ],
     "deny": [],
     "ask": []

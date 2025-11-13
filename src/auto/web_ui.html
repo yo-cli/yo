@@ -1,0 +1,742 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Yo Auto Scheduler</title>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Helvetica Neue', sans-serif;
+            background: #f9f9f9;
+            color: #2c3e50;
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #42b883 0%, #35495e 100%);
+            color: white;
+            padding: 30px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        .header h1 {
+            font-size: 28px;
+            margin-bottom: 5px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .header p {
+            opacity: 0.9;
+            font-size: 14px;
+        }
+
+        .card {
+            background: white;
+            border-radius: 8px;
+            padding: 24px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+        }
+
+        .card-title {
+            font-size: 18px;
+            font-weight: 600;
+            margin-bottom: 16px;
+            color: #2c3e50;
+            border-bottom: 2px solid #42b883;
+            padding-bottom: 8px;
+        }
+
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-weight: 500;
+            font-size: 14px;
+        }
+
+        .status-running {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .status-paused {
+            background: #fff3cd;
+            color: #856404;
+        }
+
+        .status-indicator {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+
+        .status-running .status-indicator {
+            background: #28a745;
+        }
+
+        .status-paused .status-indicator {
+            background: #ffc107;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .time-display {
+            font-size: 14px;
+            color: #6c757d;
+            margin-top: 8px;
+        }
+
+        .button-group {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            margin-bottom: 16px;
+        }
+
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.3s;
+            outline: none;
+        }
+
+        .btn-primary {
+            background: #42b883;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #35a372;
+            transform: translateY(-1px);
+            box-shadow: 0 4px 8px rgba(66, 184, 131, 0.3);
+        }
+
+        .btn-secondary {
+            background: #6c757d;
+            color: white;
+        }
+
+        .btn-secondary:hover {
+            background: #5a6268;
+        }
+
+        .btn-danger {
+            background: #dc3545;
+            color: white;
+        }
+
+        .btn-danger:hover {
+            background: #c82333;
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .input-group {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        input[type="number"] {
+            padding: 10px;
+            border: 1px solid #e5e5e5;
+            border-radius: 6px;
+            font-size: 14px;
+            width: 100px;
+            outline: none;
+            transition: border 0.3s;
+        }
+
+        input[type="number"]:focus {
+            border-color: #42b883;
+        }
+
+        .task-list {
+            list-style: none;
+        }
+
+        .task-item {
+            padding: 12px;
+            border-left: 3px solid #42b883;
+            margin-bottom: 10px;
+            background: #f8f9fa;
+            border-radius: 4px;
+        }
+
+        .task-item.disabled {
+            border-left-color: #ccc;
+            opacity: 0.6;
+        }
+
+        .task-name {
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+
+        .task-description {
+            font-size: 13px;
+            color: #6c757d;
+        }
+
+        .task-badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 11px;
+            margin-left: 8px;
+        }
+
+        .task-badge.enabled {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .task-badge.disabled {
+            background: #f8d7da;
+            color: #721c24;
+        }
+
+        .history-list {
+            list-style: none;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .history-item {
+            padding: 10px;
+            border-bottom: 1px solid #e5e5e5;
+            font-size: 13px;
+        }
+
+        .history-item:last-child {
+            border-bottom: none;
+        }
+
+        .history-time {
+            color: #6c757d;
+            font-family: monospace;
+        }
+
+        .history-success {
+            color: #28a745;
+        }
+
+        .history-failed {
+            color: #dc3545;
+        }
+
+        .history-message {
+            color: #6c757d;
+            font-size: 12px;
+            margin-top: 4px;
+            padding-left: 20px;
+        }
+
+        .log-list {
+            list-style: none;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .log-item {
+            padding: 8px;
+            font-size: 13px;
+            font-family: monospace;
+            border-bottom: 1px solid #e5e5e5;
+        }
+
+        .log-item:last-child {
+            border-bottom: none;
+        }
+
+        .log-time {
+            color: #6c757d;
+        }
+
+        .upcoming-list {
+            list-style: none;
+        }
+
+        .upcoming-item {
+            padding: 12px;
+            border-left: 3px solid #42b883;
+            margin-bottom: 10px;
+            background: #f8f9fa;
+            border-radius: 4px;
+        }
+
+        .upcoming-time {
+            font-weight: 600;
+            color: #2c3e50;
+            margin-bottom: 4px;
+            font-size: 14px;
+        }
+
+        .upcoming-info {
+            font-size: 13px;
+            color: #6c757d;
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .upcoming-name {
+            font-weight: 600;
+            color: #42b883;
+        }
+
+        .upcoming-type {
+            color: #6c757d;
+        }
+
+        .upcoming-countdown {
+            margin-left: auto;
+            background: #fff3cd;
+            color: #856404;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 40px;
+            color: #6c757d;
+        }
+
+        .language-switcher {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            display: flex;
+            gap: 10px;
+        }
+
+        .language-btn {
+            padding: 6px 12px;
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            background: rgba(255, 255, 255, 0.1);
+            color: white;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 13px;
+            transition: all 0.3s;
+        }
+
+        .language-btn:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
+
+        .language-btn.active {
+            background: rgba(255, 255, 255, 0.3);
+            font-weight: 600;
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                padding: 10px;
+            }
+
+            .header {
+                padding: 20px;
+            }
+
+            .card {
+                padding: 16px;
+            }
+
+            .button-group {
+                flex-direction: column;
+            }
+
+            .btn {
+                width: 100%;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <div class="container">
+            <!-- Header -->
+            <div class="header" style="position: relative;">
+                <div class="language-switcher">
+                    <button class="language-btn" :class="{ active: locale === 'zh' }" @click="setLocale('zh')">中文</button>
+                    <button class="language-btn" :class="{ active: locale === 'en' }" @click="setLocale('en')">EN</button>
+                </div>
+                <h1>🎯 {{ t('title') }}</h1>
+                <p>{{ t('subtitle') }}</p>
+            </div>
+
+            <!-- 状态面板 -->
+            <div class="card">
+                <div class="card-title">{{ t('status') }}</div>
+                <div :class="['status-badge', status.paused ? 'status-paused' : 'status-running']">
+                    <span class="status-indicator"></span>
+                    <span v-if="status.paused">⏸ {{ t('paused') }} ({{ t('remaining') }} {{ formatTime(status.remaining_seconds) }})</span>
+                    <span v-else>● {{ t('running') }}</span>
+                </div>
+                <div class="time-display">{{ t('currentTime') }}: {{ formatDateTime(status.current_time) }}</div>
+            </div>
+
+            <!-- 暂停控制 -->
+            <div class="card">
+                <div class="card-title">{{ t('pauseControl') }}</div>
+                <div class="button-group">
+                    <button class="btn btn-primary" @click="pauseFor(5)" :disabled="status.paused">5{{ t('minutes') }}</button>
+                    <button class="btn btn-primary" @click="pauseFor(15)" :disabled="status.paused">15{{ t('minutes') }}</button>
+                    <button class="btn btn-primary" @click="pauseFor(30)" :disabled="status.paused">30{{ t('minutes') }}</button>
+                    <button class="btn btn-primary" @click="pauseFor(60)" :disabled="status.paused">1{{ t('hour') }}</button>
+                    <button class="btn btn-primary" @click="pauseFor(120)" :disabled="status.paused">2{{ t('hours') }}</button>
+                </div>
+                <div class="input-group">
+                    <span>{{ t('custom') }}:</span>
+                    <input type="number" v-model.number="customMinutes" min="1" max="1440" :placeholder="t('minutes')" :disabled="status.paused">
+                    <button class="btn btn-primary" @click="pauseCustom" :disabled="status.paused || !customMinutes">{{ t('pause') }}</button>
+                </div>
+                <div style="margin-top: 16px;">
+                    <button class="btn btn-danger" @click="resume" :disabled="!status.paused">{{ t('resumeNow') }}</button>
+                </div>
+            </div>
+
+            <!-- 即将执行的任务 -->
+            <div class="card">
+                <div class="card-title">⏰ {{ t('upcomingTasks') }}</div>
+                <ul class="upcoming-list" v-if="upcoming.length > 0">
+                    <li v-for="(item, index) in upcoming" :key="index" class="upcoming-item">
+                        <div class="upcoming-time">{{ formatDateTime(item.execute_at) }}</div>
+                        <div class="upcoming-info">
+                            <span class="upcoming-name">{{ item.task_name }}</span>
+                            <span class="upcoming-type">({{ item.task_type }})</span>
+                            <span class="upcoming-countdown">{{ formatCountdown(item.seconds_until) }}</span>
+                        </div>
+                    </li>
+                </ul>
+                <div class="empty-state" v-else>
+                    {{ t('noUpcomingTasks') }}
+                </div>
+            </div>
+
+            <!-- 任务配置 -->
+            <div class="card">
+                <div class="card-title">{{ t('taskConfig') }}</div>
+                <ul class="task-list" v-if="tasks.length > 0">
+                    <li v-for="task in tasks" :key="task.name" :class="['task-item', { disabled: !task.enabled }]">
+                        <div class="task-name">
+                            {{ task.enabled ? '✓' : '✗' }} {{ task.name }}
+                            <span :class="['task-badge', task.enabled ? 'enabled' : 'disabled']">
+                                {{ task.enabled ? t('enabled') : t('disabled') }}
+                            </span>
+                        </div>
+                        <div class="task-description" v-if="task.description">
+                            {{ task.description }}
+                        </div>
+                        <div class="task-description" v-else>
+                            {{ task.task_type }} ({{ task.start_time }} - {{ task.end_time }}, {{ t('every') }}{{ task.interval_minutes }}{{ t('minutes') }})
+                        </div>
+                    </li>
+                </ul>
+                <div class="empty-state" v-else>
+                    {{ t('noTasks') }}
+                </div>
+            </div>
+
+            <!-- 任务执行历史 -->
+            <div class="card">
+                <div class="card-title">{{ t('executionHistory') }}</div>
+                <ul class="history-list" v-if="history.length > 0">
+                    <li v-for="(item, index) in history.slice().reverse().slice(0, 20)" :key="index" class="history-item">
+                        <span :class="['history-time', item.success ? 'history-success' : 'history-failed']">
+                            {{ item.success ? '✓' : '✗' }}
+                        </span>
+                        <span class="history-time">{{ formatTime2(item.executed_at) }}</span>
+                        {{ item.task_name }}
+                        <span style="color: #6c757d;">({{ item.task_type }})</span>
+                        <div class="history-message" v-if="item.message">
+                            └─ {{ item.message }}
+                        </div>
+                    </li>
+                </ul>
+                <div class="empty-state" v-else>
+                    {{ t('noHistory') }}
+                </div>
+            </div>
+
+            <!-- 操作日志 -->
+            <div class="card">
+                <div class="card-title">{{ t('operationLogs') }}</div>
+                <ul class="log-list" v-if="logs.length > 0">
+                    <li v-for="(log, index) in logs.slice().reverse().slice(0, 10)" :key="index" class="log-item">
+                        <span class="log-time">{{ formatTime2(log.timestamp) }}</span>
+                        [{{ log.operation }}] {{ log.details }}
+                    </li>
+                </ul>
+                <div class="empty-state" v-else>
+                    {{ t('noLogs') }}
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const { createApp } = Vue;
+
+        // i18n 翻译字典
+        const messages = {
+            zh: {
+                title: 'Yo Auto Scheduler',
+                subtitle: '任务调度器控制面板',
+                status: '状态',
+                paused: '暂停中',
+                running: '运行中',
+                remaining: '剩余',
+                currentTime: '当前时间',
+                pauseControl: '暂停控制',
+                minutes: '分钟',
+                minute: '分钟',
+                hour: '小时',
+                hours: '小时',
+                custom: '自定义',
+                pause: '暂停',
+                resumeNow: '立即恢复',
+                upcomingTasks: '即将执行的任务 (未来 8 个)',
+                noUpcomingTasks: '暂无即将执行的任务',
+                taskConfig: '任务配置',
+                enabled: '已启用',
+                disabled: '已禁用',
+                every: '每',
+                noTasks: '暂无任务配置',
+                executionHistory: '任务执行历史 (最近 20 条)',
+                noHistory: '暂无执行历史',
+                operationLogs: '操作日志 (最近 10 条)',
+                noLogs: '暂无操作日志',
+                stillHave: '还有',
+                seconds: '秒',
+            },
+            en: {
+                title: 'Yo Auto Scheduler',
+                subtitle: 'Task Scheduler Control Panel',
+                status: 'Status',
+                paused: 'Paused',
+                running: 'Running',
+                remaining: 'Remaining',
+                currentTime: 'Current Time',
+                pauseControl: 'Pause Control',
+                minutes: ' min',
+                minute: ' min',
+                hour: ' hour',
+                hours: ' hours',
+                custom: 'Custom',
+                pause: 'Pause',
+                resumeNow: 'Resume Now',
+                upcomingTasks: 'Upcoming Tasks (Next 8)',
+                noUpcomingTasks: 'No upcoming tasks',
+                taskConfig: 'Task Configuration',
+                enabled: 'Enabled',
+                disabled: 'Disabled',
+                every: 'Every ',
+                noTasks: 'No tasks configured',
+                executionHistory: 'Execution History (Last 20)',
+                noHistory: 'No execution history',
+                operationLogs: 'Operation Logs (Last 10)',
+                noLogs: 'No operation logs',
+                stillHave: '',
+                seconds: 's',
+            }
+        };
+
+        createApp({
+            data() {
+                return {
+                    locale: localStorage.getItem('yo-locale') || 'zh',
+                    status: {
+                        paused: false,
+                        pause_until: null,
+                        remaining_seconds: null,
+                        current_time: new Date().toISOString()
+                    },
+                    tasks: [],
+                    history: [],
+                    logs: [],
+                    upcoming: [],
+                    customMinutes: null
+                };
+            },
+            methods: {
+                async fetchStatus() {
+                    try {
+                        const response = await fetch('/api/status');
+                        this.status = await response.json();
+                    } catch (error) {
+                        console.error('Failed to fetch status:', error);
+                    }
+                },
+                async fetchTasks() {
+                    try {
+                        const response = await fetch('/api/tasks');
+                        const data = await response.json();
+                        this.tasks = data.tasks;
+                    } catch (error) {
+                        console.error('Failed to fetch tasks:', error);
+                    }
+                },
+                async fetchHistory() {
+                    try {
+                        const response = await fetch('/api/history');
+                        const data = await response.json();
+                        this.history = data.history;
+                    } catch (error) {
+                        console.error('Failed to fetch history:', error);
+                    }
+                },
+                async fetchLogs() {
+                    try {
+                        const response = await fetch('/api/logs');
+                        const data = await response.json();
+                        this.logs = data.logs;
+                    } catch (error) {
+                        console.error('Failed to fetch logs:', error);
+                    }
+                },
+                async fetchUpcoming() {
+                    try {
+                        const response = await fetch('/api/upcoming');
+                        const data = await response.json();
+                        this.upcoming = data.upcoming;
+                    } catch (error) {
+                        console.error('Failed to fetch upcoming:', error);
+                    }
+                },
+                async pauseFor(minutes) {
+                    try {
+                        await fetch('/api/pause', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ minutes })
+                        });
+                        await this.fetchAll();
+                    } catch (error) {
+                        console.error('Failed to pause:', error);
+                    }
+                },
+                async pauseCustom() {
+                    if (this.customMinutes > 0 && this.customMinutes <= 1440) {
+                        await this.pauseFor(this.customMinutes);
+                        this.customMinutes = null;
+                    }
+                },
+                async resume() {
+                    try {
+                        await fetch('/api/resume', { method: 'POST' });
+                        await this.fetchAll();
+                    } catch (error) {
+                        console.error('Failed to resume:', error);
+                    }
+                },
+                async fetchAll() {
+                    await Promise.all([
+                        this.fetchStatus(),
+                        this.fetchTasks(),
+                        this.fetchHistory(),
+                        this.fetchLogs(),
+                        this.fetchUpcoming()
+                    ]);
+                },
+                formatTime(seconds) {
+                    if (seconds === null) return '';
+                    const mins = Math.floor(seconds / 60);
+                    const secs = seconds % 60;
+                    return `${mins}:${secs.toString().padStart(2, '0')}`;
+                },
+                formatDateTime(dateStr) {
+                    if (!dateStr) return '';
+                    const date = new Date(dateStr);
+                    return date.toLocaleString('zh-CN', {
+                        year: 'numeric',
+                        month: '2-digit',
+                        day: '2-digit',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        second: '2-digit'
+                    });
+                },
+                formatTime2(dateStr) {
+                    if (!dateStr) return '';
+                    const date = new Date(dateStr);
+                    return date.toLocaleTimeString('zh-CN', {
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        second: '2-digit'
+                    });
+                },
+                formatCountdown(seconds) {
+                    if (!seconds || seconds < 0) return '';
+
+                    const hours = Math.floor(seconds / 3600);
+                    const mins = Math.floor((seconds % 3600) / 60);
+                    const secs = seconds % 60;
+
+                    const stillHave = this.t('stillHave');
+                    const hourText = this.t('hour');
+                    const minText = this.t('minute');
+                    const secText = this.t('seconds');
+
+                    if (hours > 0) {
+                        return `${stillHave}${hours}${hourText}${mins}${minText}`;
+                    } else if (mins > 0) {
+                        return `${stillHave}${mins}${minText}${secs}${secText}`;
+                    } else {
+                        return `${stillHave}${secs}${secText}`;
+                    }
+                },
+                t(key) {
+                    return messages[this.locale][key] || key;
+                },
+                setLocale(locale) {
+                    this.locale = locale;
+                    localStorage.setItem('yo-locale', locale);
+                }
+            },
+            mounted() {
+                this.fetchAll();
+                // 每 3 秒刷新一次
+                setInterval(() => {
+                    this.fetchAll();
+                }, 3000);
+            }
+        }).mount('#app');
+    </script>
+</body>
+</html>

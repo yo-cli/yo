@@ -7,6 +7,7 @@ use cbc::{
 };
 use sha2::{Sha256, Digest};
 use rand::Rng;
+use std::fs;
 use std::io;
 use thiserror::Error;
 

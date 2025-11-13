@@ -18,13 +18,15 @@ fn show_version() {
 fn show_usage() {
     println!("Usage: {} [OPTION] | run [COMMAND] | init @username/repo", PROGRAM_NAME);
     println!("Options:");
-    println!("  -v, --version        Show version information");
-    println!("  run auto             Start task scheduler (runs continuously)");
-    println!("  run clone            Clone template with keyword replacement");
-    println!("  run s5               Start SOCKS5 proxy (automatic mode)");
-    println!("  run s5 -i            Start SOCKS5 proxy (interactive mode)");
-    println!("  run s5 --interactive Start SOCKS5 proxy (interactive mode)");
-    println!("  init @username/repo  Initialize GitHub SSH keys for repository");
+    println!("  -v, --version          Show version information");
+    println!("  run auto               Start task scheduler (runs continuously)");
+    println!("  run auto --web         Start task scheduler with Web UI (default port: 9999)");
+    println!("  run auto --web [port]  Start task scheduler with Web UI on custom port");
+    println!("  run clone              Clone template with keyword replacement");
+    println!("  run s5                 Start SOCKS5 proxy (automatic mode)");
+    println!("  run s5 -i              Start SOCKS5 proxy (interactive mode)");
+    println!("  run s5 --interactive   Start SOCKS5 proxy (interactive mode)");
+    println!("  init @username/repo    Initialize GitHub SSH keys for repository");
 }
 
 fn main() {
@@ -45,11 +47,40 @@ fn main() {
 
     // 处理 run auto 命令
     if args.len() >= 3 && arg1 == "run" && args[2] == "auto" {
-        match AutoCommand::execute() {
-            Ok(_) => {}
-            Err(e) => {
-                println!("{}", format!("✗ {}", e).red().bold());
-                std::process::exit(1);
+        // 检查是否有 --web 参数
+        let mut web_enabled = false;
+        let mut web_port = 9999u16;
+
+        if args.len() >= 4 && args[3] == "--web" {
+            web_enabled = true;
+            // 检查是否指定了端口
+            if args.len() >= 5 {
+                if let Ok(port) = args[4].parse::<u16>() {
+                    web_port = port;
+                } else {
+                    println!("{}", format!("✗ Invalid port number: {}", args[4]).red().bold());
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        if web_enabled {
+            // 使用异步版本（带 Web UI）
+            match AutoCommand::execute_with_web(web_port) {
+                Ok(_) => {}
+                Err(e) => {
+                    println!("{}", format!("✗ {}", e).red().bold());
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            // 使用同步版本（不带 Web UI）
+            match AutoCommand::execute() {
+                Ok(_) => {}
+                Err(e) => {
+                    println!("{}", format!("✗ {}", e).red().bold());
+                    std::process::exit(1);
+                }
             }
         }
 
