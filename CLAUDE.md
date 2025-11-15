@@ -66,8 +66,20 @@ yo run s5 -i
 # Task scheduler (runs as persistent service)
 yo run auto
 
+# Task scheduler with Web UI (default port 9999)
+yo run auto --web
+
+# Task scheduler with Web UI on custom port
+yo run auto --web 8080
+
 # Template cloning with keyword replacement
 yo run clone
+
+# Test hourly chime playback
+yo run test
+
+# Test Volcengine TTS synthesis and playback
+yo run ve
 
 # Version info
 yo --version
@@ -84,6 +96,8 @@ The codebase follows a domain-driven structure with 5 main modules:
    - `s5_command.rs` - SOCKS5 proxy setup orchestration
    - `auto_command.rs` - Task scheduler entry point
    - `clone_command.rs` - Template cloning workflow
+   - `test_command.rs` - Hourly chime playback test
+   - `ve_command.rs` - Volcengine TTS test
 
 2. **`github/`** - GitHub integration layer
    - `token_manager.rs` - Encrypted storage/retrieval of GitHub tokens
@@ -97,11 +111,16 @@ The codebase follows a domain-driven structure with 5 main modules:
 
 4. **`auto/`** - Task scheduler subsystem
    - `scheduler.rs` - Main event loop (30s polling interval)
+   - `scheduler_async.rs` - Async version with Web UI support
    - `config.rs` - Task configuration deserialization (`~/.yo/auto_config.json`)
    - `task_executor.rs` - Task type dispatcher (lockscreen/command/tts)
+   - `task_executor_async.rs` - Async version for Web UI integration
    - `lockscreen_monitor.rs` - Windows-specific session state tracking
    - `lockscreen_state.rs` - Cross-platform lockscreen state management
    - `tts.rs` - Volcengine TTS API integration
+   - `tts_async.rs` - Async version for Web UI integration
+   - `shared_state.rs` - Thread-safe state sharing between scheduler and web server
+   - `web_server.rs` - Axum-based web server for task management UI
 
 5. **`common/`** - Shared utilities
    - `crypto_utils.rs` - AES-256-CBC encryption using machine-specific MAC address as key derivation input
@@ -117,11 +136,12 @@ The codebase follows a domain-driven structure with 5 main modules:
 - Persistent process (does NOT exit after launch)
 - 30-second polling loop checks all enabled tasks
 - Supports time range crossing midnight (e.g., 22:00-06:00)
-- Task types: `lockscreen_repeated`, `command`, `tts_command`, `adaptive_lockscreen`
+- Task types: `lockscreen_repeated`, `command`, `tts_command`, `adaptive_lockscreen`, `hourly_chime`
 - Adaptive lockscreen: dynamically adjusts interval based on user unlock behavior
 - Windows: Uses `WTSRegisterSessionNotification` for lockscreen detection
 - Hourly config reload at minute 0 for dynamic updates
 - State persistence via `~/.yo/state_{task_name}.json` for adaptive tasks
+- Web UI: Optional Axum-based server for real-time task monitoring and control
 
 **Template Cloning Flow** (`clone_command.rs`):
 1. Interactive prompts for source directory and keywords
@@ -180,3 +200,5 @@ When writing tests:
 - **Main entry point**: All commands are dispatched through `main.rs` using pattern matching on CLI args
 - **Colored output**: Extensive use of `colored` crate for user feedback (green for success, red for errors, yellow for warnings, blue for info)
 - **Task state management**: Adaptive lockscreen uses `Arc<Mutex<LockscreenState>>` for thread-safe state sharing between scheduler and monitor
+- **Async runtime**: Tokio is used for async operations, primarily for Web UI and async TTS
+- **Dual scheduler modes**: Sync version (`scheduler.rs`) for CLI-only, async version (`scheduler_async.rs`) for Web UI support

@@ -200,6 +200,15 @@ impl TaskExecutorAsync {
         println!("{}", format!("  🔊 TTS Text: \"{}\"", text).blue().bold());
         println!("{}", format!("  🎤 Voice: {}", voice).blue().bold());
 
+        // 播放语音前检查锁屏状态
+        if Self::is_screen_locked() {
+            println!(
+                "{}",
+                "ℹ Screen is locked, skipping TTS playback".blue()
+            );
+            return Ok(());
+        }
+
         let client = VolcengineTtsClient::new(api_key.clone());
         client
             .synthesize_and_play(text, voice)
@@ -225,6 +234,15 @@ impl TaskExecutorAsync {
             .as_ref()
             .ok_or_else(|| ExecutorError::MissingParameter("tts_api_key".to_string()))?;
 
+        // 播放语音前检查锁屏状态
+        if Self::is_screen_locked() {
+            println!(
+                "{}",
+                "ℹ Screen is locked, skipping hourly chime".blue()
+            );
+            return Ok(());
+        }
+
         let client = VolcengineTtsClient::new(api_key.clone());
         client
             .hourly_chime(hour)
@@ -242,6 +260,15 @@ impl TaskExecutorAsync {
                 .cyan()
                 .bold()
         );
+
+        // 检查屏幕是否已锁定
+        if Self::is_screen_locked() {
+            println!(
+                "{}",
+                "ℹ Screen is already locked, skipping TTS and lock".blue()
+            );
+            return Ok(());
+        }
 
         // 播放 TTS 提示（如果配置了）
         if let (Some(text), Some(voice), Some(api_key)) =
@@ -264,5 +291,55 @@ impl TaskExecutorAsync {
         Self::execute_lockscreen().await?;
 
         Ok(())
+    }
+
+    /// 检查屏幕是否已锁定（Windows）
+    /// 通过检查 LogonUI.exe 进程是否存在来判断
+    #[cfg(target_os = "windows")]
+    fn is_screen_locked() -> bool {
+        use windows::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW,
+            PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+        };
+        use windows::Win32::Foundation::CloseHandle;
+
+        unsafe {
+            let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+
+            if let Ok(snapshot) = snapshot {
+                let mut process_entry = PROCESSENTRY32W {
+                    dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+                    ..Default::default()
+                };
+
+                if Process32FirstW(snapshot, &mut process_entry).is_ok() {
+                    loop {
+                        // 将进程名从 UTF-16 转换为字符串
+                        let process_name = String::from_utf16_lossy(&process_entry.szExeFile);
+                        let process_name = process_name.trim_end_matches('\0');
+
+                        // 检查是否是 LogonUI.exe（锁屏界面进程）
+                        if process_name.eq_ignore_ascii_case("LogonUI.exe") {
+                            let _ = CloseHandle(snapshot);
+                            return true;
+                        }
+
+                        // 移动到下一个进程
+                        if Process32NextW(snapshot, &mut process_entry).is_err() {
+                            break;
+                        }
+                    }
+                }
+
+                let _ = CloseHandle(snapshot);
+            }
+        }
+
+        false
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn is_screen_locked() -> bool {
+        false
     }
 }

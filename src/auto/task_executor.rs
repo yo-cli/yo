@@ -174,6 +174,15 @@ impl TaskExecutor {
             format!("  🎤 Voice: {}", voice).blue().bold()
         );
 
+        // 播放语音前检查锁屏状态
+        if Self::is_screen_locked() {
+            println!(
+                "{}",
+                "ℹ Screen is locked, skipping TTS playback".blue()
+            );
+            return Ok(());
+        }
+
         // 创建 TTS 客户端并执行
         let client = VolcengineTtsClient::new(api_key.clone());
         client
@@ -200,6 +209,15 @@ impl TaskExecutor {
             .tts_api_key
             .as_ref()
             .ok_or_else(|| ExecutorError::MissingParameter("tts_api_key".to_string()))?;
+
+        // 播放语音前检查锁屏状态
+        if Self::is_screen_locked() {
+            println!(
+                "{}",
+                "ℹ Screen is locked, skipping hourly chime".blue()
+            );
+            return Ok(());
+        }
 
         // 创建 TTS 客户端并执行整点报时
         let client = VolcengineTtsClient::new(api_key.clone());
