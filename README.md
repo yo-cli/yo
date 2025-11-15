@@ -16,8 +16,6 @@ Gitbash: C:\Users\DEV\.cargo\bin\yo.exe
 - 🎨 **友好界面** - 彩色终端输出,交互式配置
 - 🦀 **纯 Rust** - 完全使用 Rust 编写,安全高效
 
-## 🚀 快速开始
-
 ### 安装
 
 ```bash
