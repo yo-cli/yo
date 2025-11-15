@@ -48,7 +48,8 @@
       "Bash(sudo cp:*)",
       "Bash(md5sum:*)",
       "Bash(cmd.exe /C start \"\" \"C:\\Users\\DEV\\.yo\\voice\\clock\\Hour_Chime_from_Clock.mp3\")",
-      "Bash(echo:*)"
+      "Bash(echo:*)",
+      "Bash(test:*)"
     ],
     "deny": [],
     "ask": []

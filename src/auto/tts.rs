@@ -1,6 +1,7 @@
 use colored::Colorize;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::PathBuf;
 use thiserror::Error;
@@ -197,21 +198,56 @@ impl VolcengineTtsClient {
         Ok(())
     }
 
-    /// 合成语音并播放
+    /// 合成语音并播放（带缓存）
     pub fn synthesize_and_play(&self, text: &str, speaker: &str) -> Result<(), TtsError> {
-        // 保存到用户配置目录
         let voice_dir = Self::get_voice_dir()?;
-        let permanent_file = voice_dir.join("last_tts.mp3");
+        let cache_dir = voice_dir.join("cache");
 
-        // 合成语音到文件
-        self.synthesize_to_file(text, speaker, &permanent_file)?;
+        // 确保缓存目录存在
+        if !cache_dir.exists() {
+            fs::create_dir_all(&cache_dir)
+                .map_err(|e| TtsError::SaveAudioFailed(format!("Failed to create cache directory: {}", e)))?;
+        }
 
-        // 播放音频
-        Self::play_audio(&permanent_file)?;
+        // 生成缓存键（基于文本和语音模型）
+        let cache_key = Self::generate_cache_key(text, speaker);
+        let cache_file = cache_dir.join(format!("{}.mp3", cache_key));
 
-        // 不删除文件，保留用于手动测试
+        // 检查缓存是否存在
+        if cache_file.exists() {
+            println!(
+                "{}",
+                format!("  ✓ Using cached audio ({})", cache_key)
+                    .green()
+                    .bold()
+            );
+            Self::play_audio(&cache_file)?;
+            return Ok(());
+        }
+
+        // 缓存未命中，调用 API 合成
+        println!(
+            "{}",
+            "  ⚡ Cache miss, synthesizing new audio..."
+                .yellow()
+                .bold()
+        );
+        self.synthesize_to_file(text, speaker, &cache_file)?;
+
+        // 播放缓存的文件
+        Self::play_audio(&cache_file)?;
 
         Ok(())
+    }
+
+    /// 生成缓存键（基于文本和语音模型的 SHA256 哈希）
+    fn generate_cache_key(text: &str, speaker: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(text.as_bytes());
+        hasher.update(speaker.as_bytes());
+        let result = hasher.finalize();
+        // 取前 16 个字节转为十六进制字符串
+        format!("{:x}", result).chars().take(32).collect()
     }
 
     /// 播放音频文件 - 使用 rodio 内置播放器（所有平台通用）

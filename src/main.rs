@@ -5,11 +5,12 @@ mod github;
 mod s5;
 
 use colored::Colorize;
-use commands::{AutoCommand, CloneCommand, GitHubInitCommand, S5Command, TestCommand};
+use commands::{AutoCommand, CloneCommand, GitHubInitCommand, S5Command, TestCommand, VeCommand};
 use std::env;
 
-const VERSION: &str = "1.0.0";
-const PROGRAM_NAME: &str = "yo";
+// 从 Cargo.toml 自动读取版本号和项目名称
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+const PROGRAM_NAME: &str = env!("CARGO_PKG_NAME");
 
 fn show_version() {
     println!("{} version {}", PROGRAM_NAME, VERSION);
@@ -27,6 +28,7 @@ fn show_usage() {
     println!("  run s5 -i              Start SOCKS5 proxy (interactive mode)");
     println!("  run s5 --interactive   Start SOCKS5 proxy (interactive mode)");
     println!("  run test               Test hourly chime playback");
+    println!("  run ve                 Test Volcengine TTS synthesis and playback");
     println!("  init @username/repo    Initialize GitHub SSH keys for repository");
 }
 
@@ -108,6 +110,19 @@ fn main() {
     // 处理 run test 命令
     if args.len() >= 3 && arg1 == "run" && args[2] == "test" {
         match TestCommand::execute() {
+            Ok(_) => {}
+            Err(e) => {
+                println!("{}", format!("✗ {}", e).red().bold());
+                std::process::exit(1);
+            }
+        }
+
+        return;
+    }
+
+    // 处理 run ve 命令（Volcengine TTS 测试）
+    if args.len() >= 3 && arg1 == "run" && args[2] == "ve" {
+        match VeCommand::execute() {
             Ok(_) => {}
             Err(e) => {
                 println!("{}", format!("✗ {}", e).red().bold());

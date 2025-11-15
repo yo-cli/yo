@@ -4,6 +4,8 @@ use crate::auto::task_executor_async::TaskExecutorAsync;
 use chrono::{Local, NaiveTime, Timelike};
 use colored::Colorize;
 use std::collections::HashMap;
+use std::fs;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -30,10 +32,42 @@ pub struct TaskSchedulerAsync {
 impl TaskSchedulerAsync {
     /// 创建新的异步调度器
     pub async fn new(state: Arc<RwLock<SharedState>>) -> Result<Self, SchedulerError> {
+        // 启动时清理 TTS 缓存
+        Self::clear_tts_cache();
+
         Ok(Self {
             state,
             last_execution: HashMap::new(),
         })
+    }
+
+    /// 清理 TTS 缓存目录
+    fn clear_tts_cache() {
+        let cache_dir = Self::get_cache_dir();
+        if cache_dir.exists() {
+            match fs::remove_dir_all(&cache_dir) {
+                Ok(_) => {
+                    println!(
+                        "{}",
+                        "  ✓ TTS cache cleared on startup".green().bold()
+                    );
+                }
+                Err(e) => {
+                    println!(
+                        "{}",
+                        format!("  ⚠ Failed to clear TTS cache: {}", e).yellow()
+                    );
+                }
+            }
+        }
+    }
+
+    /// 获取 TTS 缓存目录路径
+    fn get_cache_dir() -> PathBuf {
+        let home = std::env::var("USERPROFILE")
+            .or_else(|_| std::env::var("HOME"))
+            .unwrap_or_else(|_| ".".to_string());
+        PathBuf::from(home).join(".yo").join("voice").join("cache")
     }
 
     /// 显示当前时间和任务列表

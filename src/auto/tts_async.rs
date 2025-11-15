@@ -1,6 +1,7 @@
 use colored::Colorize;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::PathBuf;
 use thiserror::Error;
@@ -97,17 +98,24 @@ impl VolcengineTtsClient {
     ) -> Result<(), TtsError> {
         println!(
             "{}",
-            format!("🔊 Synthesizing speech: \"{}\"", text).blue().bold()
+            format!("  🔊 Synthesizing speech: \"{}\"", text).blue().bold()
         );
+        println!(
+            "{}",
+            format!("  🎤 Voice: {}", speaker).blue().bold()
+        );
+
+        // 生成唯一的 reqid
+        let reqid = format!("{}", chrono::Local::now().timestamp_nanos_opt().unwrap_or(0));
 
         let request = TtsRequest {
             app: AppConfig {
                 appid: self.resource_id.clone(),
-                token: self.api_key.clone(),
+                token: "access_token".to_string(),
                 cluster: "volcano_tts".to_string(),
             },
             user: UserConfig {
-                uid: "test_user".to_string(),
+                uid: "yo_tts_user".to_string(),
             },
             audio: AudioConfig {
                 voice_type: speaker.to_string(),
@@ -116,7 +124,7 @@ impl VolcengineTtsClient {
                 rate: 24000,
             },
             request: RequestConfig {
-                reqid: format!("req_{}", chrono::Local::now().timestamp()),
+                reqid,
                 text: text.to_string(),
                 operation: "query".to_string(),
             },
@@ -132,30 +140,108 @@ impl VolcengineTtsClient {
             .await
             .map_err(|e| TtsError::RequestFailed(format!("{}", e)))?;
 
-        let audio_bytes = response
-            .bytes()
+        // 检查响应状态
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(TtsError::ApiError(format!(
+                "HTTP {}: {}",
+                status, body
+            )));
+        }
+
+        // 解析 JSON 响应（V1 API 返回单个 JSON 对象）
+        let response_json: TtsResponse = response
+            .json()
             .await
-            .map_err(|e| TtsError::RequestFailed(format!("{}", e)))?;
+            .map_err(|e| TtsError::RequestFailed(format!("Failed to parse JSON: {}", e)))?;
+
+        // 检查返回码（V1 API 成功码是 3000）
+        if response_json.code != 3000 {
+            return Err(TtsError::ApiError(format!(
+                "API error code {}: {}",
+                response_json.code, response_json.message
+            )));
+        }
+
+        println!("{}", "  ✓ TTS synthesis completed".green());
+
+        // 提取并解码 base64 音频数据（V1 API data 字段直接是 base64 字符串）
+        let audio_base64 = response_json
+            .data
+            .as_ref()
+            .ok_or_else(|| TtsError::ApiError("No audio data in response".to_string()))?;
+
+        use base64::Engine as _;
+        let audio_data = base64::engine::general_purpose::STANDARD
+            .decode(audio_base64)
+            .map_err(|e| TtsError::ApiError(format!("Failed to decode base64: {}", e)))?;
 
         // 保存音频文件
-        fs::write(output_path, audio_bytes)
+        fs::write(output_path, audio_data)
             .map_err(|e| TtsError::SaveAudioFailed(format!("{}", e)))?;
 
-        println!("{}", "✓ Speech synthesized successfully".green().bold());
+        println!(
+            "{}",
+            format!("  ✓ Audio saved to: {}", output_path.display())
+                .green()
+                .bold()
+        );
+
         Ok(())
     }
 
-    /// 合成语音并播放（异步）
+    /// 合成语音并播放（异步，带缓存）
     pub async fn synthesize_and_play(&self, text: &str, speaker: &str) -> Result<(), TtsError> {
         let voice_dir = Self::get_voice_dir();
-        fs::create_dir_all(&voice_dir)
-            .map_err(|e| TtsError::SaveAudioFailed(format!("{}", e)))?;
+        let cache_dir = voice_dir.join("cache");
 
-        let output_path = voice_dir.join("last_tts.mp3");
-        self.synthesize_to_file(text, speaker, &output_path).await?;
+        // 确保缓存目录存在
+        fs::create_dir_all(&cache_dir)
+            .map_err(|e| TtsError::SaveAudioFailed(format!("Failed to create cache directory: {}", e)))?;
 
-        Self::play_audio(&output_path)?;
+        // 生成缓存键（基于文本和语音模型）
+        let cache_key = Self::generate_cache_key(text, speaker);
+        let cache_file = cache_dir.join(format!("{}.mp3", cache_key));
+
+        // 检查缓存是否存在
+        if cache_file.exists() {
+            println!(
+                "{}",
+                format!("  ✓ Using cached audio ({})", cache_key)
+                    .green()
+                    .bold()
+            );
+            Self::play_audio(&cache_file)?;
+            return Ok(());
+        }
+
+        // 缓存未命中，调用 API 合成
+        println!(
+            "{}",
+            "  ⚡ Cache miss, synthesizing new audio..."
+                .yellow()
+                .bold()
+        );
+        self.synthesize_to_file(text, speaker, &cache_file).await?;
+
+        // 播放缓存的文件
+        Self::play_audio(&cache_file)?;
+
         Ok(())
+    }
+
+    /// 生成缓存键（基于文本和语音模型的 SHA256 哈希）
+    fn generate_cache_key(text: &str, speaker: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(text.as_bytes());
+        hasher.update(speaker.as_bytes());
+        let result = hasher.finalize();
+        // 取前 16 个字节转为十六进制字符串
+        format!("{:x}", result).chars().take(32).collect()
     }
 
     /// 整点报时（异步）
@@ -172,63 +258,52 @@ impl VolcengineTtsClient {
         Ok(())
     }
 
-    /// 播放音频文件
-    fn play_audio(audio_path: &PathBuf) -> Result<(), TtsError> {
+    /// 播放音频文件 - 使用 rodio 内置播放器（所有平台通用）
+    fn play_audio(file_path: &PathBuf) -> Result<(), TtsError> {
         println!(
             "{}",
-            format!("🔊 Playing audio: {}", audio_path.display())
-                .blue()
+            format!("  🔊 Playing audio: {}", file_path.display())
+                .green()
                 .bold()
         );
 
-        #[cfg(target_os = "windows")]
-        {
-            use std::process::Command;
-            let path_str = audio_path.to_string_lossy().to_string();
-            Command::new("cmd")
-                .args(&["/C", "start", "", &path_str])
-                .spawn()
-                .map_err(|e| TtsError::PlayAudioFailed(format!("{}", e)))?;
+        // 验证文件存在
+        if !file_path.exists() {
+            return Err(TtsError::PlayAudioFailed(format!(
+                "Audio file not found: {}",
+                file_path.display()
+            )));
         }
 
-        #[cfg(not(target_os = "windows"))]
-        {
-            // 检测是否在 WSL 环境中
-            let is_wsl = std::path::Path::new("/proc/version").exists()
-                && std::fs::read_to_string("/proc/version")
-                    .map(|s| s.to_lowercase().contains("microsoft") || s.to_lowercase().contains("wsl"))
-                    .unwrap_or(false);
+        println!("{}", format!("  📁 Audio file path: {}", file_path.display()).blue());
 
-            // 在 WSL 中使用 Windows 命令播放
-            if is_wsl {
-                use std::process::Command;
-                let path_str = audio_path.to_string_lossy().to_string();
-                Command::new("cmd.exe")
-                    .args(&["/C", "start", "", &path_str])
-                    .spawn()
-                    .map_err(|e| TtsError::PlayAudioFailed(format!("{}", e)))?;
-            } else {
-                // 真实的 Linux 环境使用 rodio
-                use rodio::{Decoder, OutputStream, Sink};
-                use std::fs::File;
-                use std::io::BufReader;
+        // 使用 rodio 播放音频（所有平台统一）
+        use std::fs::File;
+        use std::io::BufReader;
 
-                let (_stream, stream_handle) = OutputStream::try_default()
-                    .map_err(|e| TtsError::PlayAudioFailed(format!("{}", e)))?;
-                let sink = Sink::try_new(&stream_handle)
-                    .map_err(|e| TtsError::PlayAudioFailed(format!("{}", e)))?;
+        let file = File::open(file_path)
+            .map_err(|e| TtsError::PlayAudioFailed(format!("Failed to open file: {}", e)))?;
+        let source = BufReader::new(file);
 
-                let file = File::open(audio_path)
-                    .map_err(|e| TtsError::PlayAudioFailed(format!("{}", e)))?;
-                let source = Decoder::new(BufReader::new(file))
-                    .map_err(|e| TtsError::PlayAudioFailed(format!("{}", e)))?;
+        println!("{}", "  🎵 Initializing audio output...".blue());
 
-                sink.append(source);
-                sink.sleep_until_end();
-            }
-        }
+        let (_stream, stream_handle) = rodio::OutputStream::try_default()
+            .map_err(|e| TtsError::PlayAudioFailed(format!("Failed to get audio output: {}", e)))?;
 
-        println!("{}", "✓ Audio playback completed".green().bold());
+        let sink = rodio::Sink::try_new(&stream_handle)
+            .map_err(|e| TtsError::PlayAudioFailed(format!("Failed to create audio sink: {}", e)))?;
+
+        println!("{}", "  🎵 Decoding audio...".blue());
+
+        let decoder = rodio::Decoder::new(source)
+            .map_err(|e| TtsError::PlayAudioFailed(format!("Failed to decode audio: {}", e)))?;
+
+        println!("{}", "  ▶️  Playing...".green().bold());
+
+        sink.append(decoder);
+        sink.sleep_until_end();
+
+        println!("{}", "  ✓ Audio playback completed".green().bold());
         Ok(())
     }
 
