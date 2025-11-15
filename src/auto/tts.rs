@@ -214,7 +214,7 @@ impl VolcengineTtsClient {
         Ok(())
     }
 
-    /// 播放音频文件 - 使用内嵌播放器（所有平台通用）
+    /// 播放音频文件 - 使用 rodio 内置播放器（所有平台通用）
     pub fn play_audio(file_path: &PathBuf) -> Result<(), TtsError> {
         println!(
             "{}",
@@ -223,64 +223,44 @@ impl VolcengineTtsClient {
                 .bold()
         );
 
-        // 在 WSL 或 Windows 中使用 Windows 命令播放
-        #[cfg(target_os = "windows")]
-        {
-            use std::process::Command;
-            let path_str = file_path.to_string_lossy().to_string();
-            Command::new("cmd")
-                .args(&["/C", "start", "", &path_str])
-                .spawn()
-                .map_err(|e| TtsError::PlayAudioFailed(format!("{}", e)))?;
-
-            println!("{}", "  ✓ Audio playback started".green().bold());
-            return Ok(());
+        // 验证文件存在
+        if !file_path.exists() {
+            return Err(TtsError::PlayAudioFailed(format!(
+                "Audio file not found: {}",
+                file_path.display()
+            )));
         }
 
-        #[cfg(not(target_os = "windows"))]
-        {
-            // 检测是否在 WSL 环境中
-            let is_wsl = std::path::Path::new("/proc/version").exists()
-                && std::fs::read_to_string("/proc/version")
-                    .map(|s| s.to_lowercase().contains("microsoft") || s.to_lowercase().contains("wsl"))
-                    .unwrap_or(false);
+        println!("{}", format!("  📁 Audio file path: {}", file_path.display()).blue());
 
-            // 在 WSL 中使用 Windows 命令播放
-            if is_wsl {
-                use std::process::Command;
-                let path_str = file_path.to_string_lossy().to_string();
-                Command::new("cmd.exe")
-                    .args(&["/C", "start", "", &path_str])
-                    .spawn()
-                    .map_err(|e| TtsError::PlayAudioFailed(format!("{}", e)))?;
+        // 使用 rodio 播放音频（所有平台统一）
+        use std::fs::File;
+        use std::io::BufReader;
 
-                println!("{}", "  ✓ Audio playback started".green().bold());
-                return Ok(());
-            }
+        let file = File::open(file_path)
+            .map_err(|e| TtsError::PlayAudioFailed(format!("Failed to open file: {}", e)))?;
+        let source = BufReader::new(file);
 
-            // 真实的 Linux 环境使用 rodio
-            use std::fs::File;
-            use std::io::BufReader;
+        println!("{}", "  🎵 Initializing audio output...".blue());
 
-            let file = File::open(file_path)
-                .map_err(|e| TtsError::PlayAudioFailed(format!("Failed to open file: {}", e)))?;
-            let source = BufReader::new(file);
+        let (_stream, stream_handle) = rodio::OutputStream::try_default()
+            .map_err(|e| TtsError::PlayAudioFailed(format!("Failed to get audio output: {}", e)))?;
 
-            let (_stream, stream_handle) = rodio::OutputStream::try_default()
-                .map_err(|e| TtsError::PlayAudioFailed(format!("Failed to get audio output: {}", e)))?;
+        let sink = rodio::Sink::try_new(&stream_handle)
+            .map_err(|e| TtsError::PlayAudioFailed(format!("Failed to create audio sink: {}", e)))?;
 
-            let sink = rodio::Sink::try_new(&stream_handle)
-                .map_err(|e| TtsError::PlayAudioFailed(format!("Failed to create audio sink: {}", e)))?;
+        println!("{}", "  🎵 Decoding audio...".blue());
 
-            let decoder = rodio::Decoder::new(source)
-                .map_err(|e| TtsError::PlayAudioFailed(format!("Failed to decode audio: {}", e)))?;
+        let decoder = rodio::Decoder::new(source)
+            .map_err(|e| TtsError::PlayAudioFailed(format!("Failed to decode audio: {}", e)))?;
 
-            sink.append(decoder);
-            sink.sleep_until_end();
+        println!("{}", "  ▶️  Playing...".green().bold());
 
-            println!("{}", "  ✓ Audio playback completed".green().bold());
-            Ok(())
-        }
+        sink.append(decoder);
+        sink.sleep_until_end();
+
+        println!("{}", "  ✓ Audio playback completed".green().bold());
+        Ok(())
     }
 
     /// 整点报时：播放时钟报时声音

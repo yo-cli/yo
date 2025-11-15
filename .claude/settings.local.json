@@ -46,7 +46,9 @@
       "Bash(pkg-config:*)",
       "Bash(/root/.cargo/bin/yo:*)",
       "Bash(sudo cp:*)",
-      "Bash(md5sum:*)"
+      "Bash(md5sum:*)",
+      "Bash(cmd.exe /C start \"\" \"C:\\Users\\DEV\\.yo\\voice\\clock\\Hour_Chime_from_Clock.mp3\")",
+      "Bash(echo:*)"
     ],
     "deny": [],
     "ask": []
