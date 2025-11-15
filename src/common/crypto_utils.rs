@@ -7,6 +7,7 @@ use cbc::{
 };
 use sha2::{Sha256, Digest};
 use rand::Rng;
+#[cfg(target_os = "linux")]
 use std::fs;
 use std::io;
 use thiserror::Error;

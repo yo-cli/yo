@@ -1,4 +1,4 @@
-use crate::auto::config::{AutoConfig, Task};
+use crate::auto::config::Task;
 use crate::auto::shared_state::SharedState;
 use crate::auto::task_executor_async::TaskExecutorAsync;
 use chrono::{Local, NaiveTime, Timelike};
@@ -12,10 +12,13 @@ use tokio::sync::RwLock;
 #[derive(Debug, Error)]
 pub enum SchedulerError {
     #[error("Failed to load config: {0}")]
+    #[allow(dead_code)]
     ConfigLoadError(String),
     #[error("Task execution failed: {0}")]
+    #[allow(dead_code)]
     ExecutionError(String),
     #[error("Invalid time format: {0}")]
+    #[allow(dead_code)]
     InvalidTimeFormat(String),
 }
 
@@ -268,7 +271,7 @@ impl TaskSchedulerAsync {
         };
 
         // 计算从开始时间经过的分钟数
-        let mut minutes_since_start = if current_time >= start_time {
+        let minutes_since_start = if current_time >= start_time {
             (current_time.signed_duration_since(start_time).num_minutes()) as i64
         } else {
             // 跨午夜情况

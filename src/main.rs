@@ -45,6 +45,10 @@ fn main() {
         return;
     }
 
+    // 在执行任何命令前打印版本信息
+    show_version();
+    println!(); // 空行分隔
+
     // 处理 run auto 命令
     if args.len() >= 3 && arg1 == "run" && args[2] == "auto" {
         // 检查是否有 --web 参数

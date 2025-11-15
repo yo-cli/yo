@@ -19,6 +19,7 @@ pub enum SSHError {
     #[error("HOME environment variable not set")]
     HomeNotSet,
     #[error("Permission error: {0}")]
+    #[allow(dead_code)]
     PermissionError(String),
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),

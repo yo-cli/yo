@@ -14,6 +14,7 @@ pub enum SchedulerError {
     #[error("Failed to load config: {0}")]
     ConfigLoadError(String),
     #[error("Task execution failed: {0}")]
+    #[allow(dead_code)]
     ExecutionError(String),
     #[error("Invalid time format: {0}")]
     InvalidTimeFormat(String),
@@ -23,6 +24,7 @@ pub struct TaskScheduler {
     config: AutoConfig,
     last_execution: HashMap<String, String>, // task_name -> last_execution_time (YYYY-MM-DD HH:MM)
     adaptive_states: HashMap<String, StateManager>, // task_name -> StateManager (for adaptive_lockscreen tasks)
+    #[allow(dead_code)]
     monitors: HashMap<String, LockscreenMonitor>, // task_name -> Monitor (for adaptive_lockscreen tasks)
 }
 

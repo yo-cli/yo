@@ -223,12 +223,6 @@ impl VolcengineTtsClient {
                 .bold()
         );
 
-        // 检测是否在 WSL 环境中
-        let is_wsl = std::path::Path::new("/proc/version").exists()
-            && std::fs::read_to_string("/proc/version")
-                .map(|s| s.to_lowercase().contains("microsoft") || s.to_lowercase().contains("wsl"))
-                .unwrap_or(false);
-
         // 在 WSL 或 Windows 中使用 Windows 命令播放
         #[cfg(target_os = "windows")]
         {
@@ -245,6 +239,12 @@ impl VolcengineTtsClient {
 
         #[cfg(not(target_os = "windows"))]
         {
+            // 检测是否在 WSL 环境中
+            let is_wsl = std::path::Path::new("/proc/version").exists()
+                && std::fs::read_to_string("/proc/version")
+                    .map(|s| s.to_lowercase().contains("microsoft") || s.to_lowercase().contains("wsl"))
+                    .unwrap_or(false);
+
             // 在 WSL 中使用 Windows 命令播放
             if is_wsl {
                 use std::process::Command;

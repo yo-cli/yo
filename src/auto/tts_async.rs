@@ -17,6 +17,7 @@ pub enum TtsError {
     #[error("Failed to play audio: {0}")]
     PlayAudioFailed(String),
     #[error("API error: {0}")]
+    #[allow(dead_code)]
     ApiError(String),
 }
 
@@ -56,6 +57,7 @@ struct TtsRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct TtsResponse {
     code: i32,
     message: String,
@@ -157,7 +159,7 @@ impl VolcengineTtsClient {
     }
 
     /// 整点报时（异步）
-    pub async fn hourly_chime(&self, hour: u32) -> Result<(), TtsError> {
+    pub async fn hourly_chime(&self, _hour: u32) -> Result<(), TtsError> {
         let voice_dir = Self::get_voice_dir();
         fs::create_dir_all(&voice_dir)
             .map_err(|e| TtsError::SaveAudioFailed(format!("{}", e)))?;
@@ -179,12 +181,6 @@ impl VolcengineTtsClient {
                 .bold()
         );
 
-        // 检测是否在 WSL 环境中
-        let is_wsl = std::path::Path::new("/proc/version").exists()
-            && std::fs::read_to_string("/proc/version")
-                .map(|s| s.to_lowercase().contains("microsoft") || s.to_lowercase().contains("wsl"))
-                .unwrap_or(false);
-
         #[cfg(target_os = "windows")]
         {
             use std::process::Command;
@@ -197,6 +193,12 @@ impl VolcengineTtsClient {
 
         #[cfg(not(target_os = "windows"))]
         {
+            // 检测是否在 WSL 环境中
+            let is_wsl = std::path::Path::new("/proc/version").exists()
+                && std::fs::read_to_string("/proc/version")
+                    .map(|s| s.to_lowercase().contains("microsoft") || s.to_lowercase().contains("wsl"))
+                    .unwrap_or(false);
+
             // 在 WSL 中使用 Windows 命令播放
             if is_wsl {
                 use std::process::Command;

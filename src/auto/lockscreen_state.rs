@@ -94,6 +94,7 @@ impl LockscreenState {
     }
 
     /// 记录解锁（减半间隔）
+    #[allow(dead_code)]
     pub fn record_unlock(&mut self, min_interval_seconds: u32) {
         self.last_unlock_time = Some(Local::now());
         self.unlock_count += 1;
@@ -175,6 +176,7 @@ impl StateManager {
     }
 
     /// 获取状态的克隆（用于读取）
+    #[allow(dead_code)]
     pub fn get_state(&self) -> LockscreenState {
         self.state.lock().unwrap().clone()
     }
@@ -203,6 +205,7 @@ impl StateManager {
     }
 
     /// 记录解锁
+    #[allow(dead_code)]
     pub fn record_unlock(&self, min_interval_seconds: u32) {
         let mut state = self.state.lock().unwrap();
         state.record_unlock(min_interval_seconds);

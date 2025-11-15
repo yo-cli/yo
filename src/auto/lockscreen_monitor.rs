@@ -2,14 +2,15 @@ use crate::auto::lockscreen_state::LockscreenState;
 use colored::Colorize;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum MonitorError {
     #[error("Failed to start monitor thread: {0}")]
+    #[allow(dead_code)]
     ThreadError(String),
     #[error("Windows API error: {0}")]
+    #[allow(dead_code)]
     WindowsApiError(String),
 }
 
@@ -61,15 +62,12 @@ impl LockscreenMonitor {
         use windows::Win32::System::RemoteDesktop::{
             WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
         };
-        // Session change constants
-        const WTS_SESSION_LOCK: u32 = 0x7;
-        const WTS_SESSION_UNLOCK: u32 = 0x8;
         use windows::Win32::UI::WindowsAndMessaging::{
-            CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, PostQuitMessage,
-            TranslateMessage, HWND_MESSAGE, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WM_WTSSESSION_CHANGE,
+            CreateWindowExW, DispatchMessageW, GetMessageW,
+            TranslateMessage, HWND_MESSAGE, MSG, WINDOW_EX_STYLE, WINDOW_STYLE,
             WNDCLASSW, CS_HREDRAW, CS_VREDRAW,
         };
-        use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+        use windows::Win32::Foundation::HWND;
         use windows::core::{w, PCWSTR};
 
         println!("{}", "🔍 Starting Windows session monitor...".cyan().bold());
@@ -149,9 +147,10 @@ impl LockscreenMonitor {
         wparam: windows::Win32::Foundation::WPARAM,
         lparam: windows::Win32::Foundation::LPARAM,
     ) -> windows::Win32::Foundation::LRESULT {
-        use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
         // Session change constants
+        #[allow(dead_code)]
         const WTS_SESSION_LOCK: u32 = 0x7;
+        #[allow(dead_code)]
         const WTS_SESSION_UNLOCK: u32 = 0x8;
         use windows::Win32::UI::WindowsAndMessaging::{DefWindowProcW, WM_WTSSESSION_CHANGE};
 
@@ -210,6 +209,7 @@ impl LockscreenMonitor {
     }
 
     /// 停止监控
+    #[allow(dead_code)]
     pub fn stop(&self) {
         let mut running = self.is_running.lock().unwrap();
         *running = false;

@@ -12,6 +12,7 @@ pub enum ExecutorError {
     #[error("Unsupported task type: {0}")]
     UnsupportedTaskType(String),
     #[error("Lock screen command not available on this platform")]
+    #[allow(dead_code)]
     LockScreenNotSupported,
     #[error("TTS error: {0}")]
     TtsError(String),

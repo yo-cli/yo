@@ -1,6 +1,5 @@
 use colored::Colorize;
 use inquire::Text;
-use regex::Regex;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write as IoWrite};
@@ -15,6 +14,7 @@ pub enum CloneError {
     #[error("Invalid path: {0}")]
     InvalidPath(String),
     #[error("Source not found: {0}")]
+    #[allow(dead_code)]
     SourceNotFound(String),
     #[error("User cancelled operation")]
     UserCancelled,

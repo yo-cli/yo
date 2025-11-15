@@ -1,4 +1,5 @@
 cargo install --path .
+Gitbash: C:\Users\DEV\.cargo\bin\yo.exe
 
 # Yo - 多功能命令行工具
 
