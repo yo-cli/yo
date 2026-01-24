@@ -98,7 +98,7 @@ impl CryptoUtils {
     fn aes_encrypt(plaintext: &str, key: &[u8]) -> Result<Vec<u8>, CryptoError> {
         // 生成随机 IV
         let mut iv = [0u8; AES_BLOCK_SIZE];
-        rand::thread_rng().fill(&mut iv);
+        rand::rng().fill(&mut iv);
 
         // 准备数据 - 分配足够的空间用于填充（最多一个完整块）
         let plaintext_bytes = plaintext.as_bytes();

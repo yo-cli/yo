@@ -1,4 +1,4 @@
-use crate::auto::tts::VolcengineTtsClient;
+use crate::auto::tts::play_audio;
 use chrono::Timelike;
 use colored::Colorize;
 use std::path::PathBuf;
@@ -57,7 +57,7 @@ impl TestCommand {
         println!();
 
         // 播放音频
-        VolcengineTtsClient::play_audio(&chime_file)
+        play_audio(&chime_file)
             .map_err(|e| TestError::TtsError(format!("{}", e)))?;
 
         println!();

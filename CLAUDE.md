@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **Yo** is a multi-functional command-line tool written in pure Rust that provides:
 - GitHub SSH key management (automatic deploy key setup)
 - SOCKS5 proxy service (Docker + GOST based)
-- Task scheduler with lockscreen automation and TTS reminders
+- Task scheduler with Rhai scripting, lockscreen automation and TTS reminders
 - Template cloning with keyword replacement
 
 The tool is designed for Windows/Linux/macOS cross-platform support with a focus on security (AES-256-CBC encryption for sensitive data).
@@ -114,20 +114,27 @@ The codebase follows a domain-driven structure with 5 main modules:
    - `proxy_manager.rs` - GOST proxy configuration and lifecycle
    - `network_utils.rs` - Port availability checking and network testing
 
-4. **`auto/`** - Task scheduler subsystem
-   - `scheduler.rs` - Main event loop (30s polling interval)
-   - `scheduler_async.rs` - Async version with Web UI support
-   - `config.rs` - Task configuration deserialization (`~/.yo/auto_config.json`)
-   - `task_executor.rs` - Task type dispatcher (lockscreen/command/tts)
-   - `task_executor_async.rs` - Async version for Web UI integration
-   - `lockscreen_monitor.rs` - Windows-specific session state tracking
-   - `lockscreen_state.rs` - Cross-platform lockscreen state management
-   - `tts.rs` - Volcengine TTS API integration
-   - `tts_async.rs` - Async version for Web UI integration
-   - `shared_state.rs` - Thread-safe state sharing between scheduler and web server
-   - `web_server.rs` - Axum-based web server for task management UI
-   - `autostart.rs` - Windows autostart management (VBS script in Startup folder)
-   - `instance_lock.rs` - Single instance enforcement via PID file lock
+4. **`auto/`** - Task scheduler subsystem (Rhai-based)
+   - `rhai/` - Rhai scripting engine
+     - `engine.rs` - Rhai engine initialization, API registration, script loading
+     - `scheduler.rs` - Main scheduler with 30s polling loop
+     - `api.rs` - Exposed Rhai APIs (speak, lock_screen, shutdown, etc.)
+     - `types.rs` - Rule, Trigger, GlobalState definitions
+     - `default_rules.rs` - Default script templates
+   - `screen/` - Lockscreen monitoring
+     - `monitor.rs` - Windows session state tracking via WTS APIs
+   - `startup/` - Windows autostart management
+     - `manager.rs` - VBS script creation in Startup folder
+   - `tts/` - Text-to-speech
+     - `client.rs` - Volcengine TTS API client
+     - `player.rs` - Audio playback via rodio
+   - `state/` - State management
+     - `instance_lock.rs` - Single instance enforcement via PID file
+   - `web/` - Web UI server
+     - `server.rs` - Axum-based REST API and static file serving
+     - `types.rs` - WebState definition
+   - `ui/` - Web UI frontend
+     - `web_ui.html` - Vue 3 Composition API frontend with script editor
 
 5. **`common/`** - Shared utilities
    - `crypto_utils.rs` - AES-256-CBC encryption using machine-specific MAC address as key derivation input
@@ -139,17 +146,28 @@ The codebase follows a domain-driven structure with 5 main modules:
 - Key derivation: SHA-256(MAC_address + SALT)
 - Stored in `~/.yo/github_token.enc`
 
+**Rhai Scripting Engine**:
+- Scripts are stored in `~/.yo/rules/*.rhai`
+- Each script defines a `trigger` configuration and event handlers
+- Trigger options: `time_range`, `interval_minutes`, `events`, `weekdays`, `enabled`
+- Event types: `tick` (30s interval), `lock`, `unlock`
+- Available APIs:
+  - `speak(text)` - TTS playback
+  - `lock_screen()` - Lock workstation
+  - `shutdown(delay_secs)` - Delayed shutdown
+  - `chime(hour)` - Hourly chime playback
+  - `current_hour()`, `current_minute()` - Time utilities
+  - `is_weekend()`, `is_workday()` - Day type checks
+  - `get_counter(name)`, `set_counter(name, val)` - Persistent counters
+  - `get_flag(name)`, `set_flag(name, val)` - Persistent flags
+  - `log(msg)` - Console logging
+
 **Task Scheduler Architecture**:
 - Persistent process (does NOT exit after launch)
-- 30-second polling loop checks all enabled tasks
-- Supports time range crossing midnight (e.g., 22:00-06:00)
-- Task types: `lockscreen_repeated`, `command`, `tts_command`, `adaptive_lockscreen`, `hourly_chime`
-- Adaptive lockscreen: dynamically adjusts interval based on user unlock behavior
-- Optional `max_unlocks` + `shutdown_on_exceed` for forced shutdown after repeated unlocks
+- 30-second polling loop triggers `on_tick` for rules with matching time/weekday
+- Lock/unlock events trigger `on_lock` and `on_unlock` handlers
 - Windows: Uses `WTSRegisterSessionNotification` for lockscreen detection
-- Hourly config reload at minute 0 for dynamic updates
-- State persistence via `~/.yo/state_{task_name}.json` for adaptive tasks
-- Web UI: Optional Axum-based server for real-time task monitoring and control
+- Web UI: Axum server with script editing capability
 - Single instance: PID-based lock prevents multiple scheduler instances
 
 **Windows Autostart**:
@@ -178,13 +196,46 @@ The codebase follows a domain-driven structure with 5 main modules:
 
 ## Configuration Files
 
-- `~/.yo/auto_config.json` - Task scheduler configuration (created on first run with default night_lockscreen task)
-- `~/.yo/state_{task_name}.json` - Per-task state for adaptive_lockscreen tasks
+- `~/.yo/rules/*.rhai` - Rhai script rules (created on first run with default examples)
 - `~/.yo/yo-auto.pid` - PID file for single instance lock (auto command)
 - `~/.yo/github_token.enc` - Encrypted GitHub personal access token
 - `~/.ssh/config` - Modified by `init` command to add deploy key aliases
-- `voice/` directory - Generated TTS audio files for tts_command tasks
+- `voice/` directory - Generated TTS audio files
 - `%APPDATA%\...\Startup\yo-auto-web.vbs` - Windows autostart script (when installed)
+
+## Rhai Script Example
+
+```rhai
+// ~/.yo/rules/night_lockscreen.rhai
+
+// Trigger configuration
+let trigger = #{
+    time_range: ["21:30", "05:00"],
+    interval_minutes: 5,
+    events: ["tick"],
+    weekdays: [1, 2, 3, 4, 5, 6, 7],  // All days
+    enabled: true,
+};
+
+// Called every 30 seconds when in time range
+fn on_tick() {
+    speak("Time to rest");
+    lock_screen();
+}
+
+// Called when screen is unlocked
+fn on_unlock() {
+    let count = get_counter("unlock_count") + 1;
+    set_counter("unlock_count", count);
+
+    if count >= 3 {
+        speak("Maximum unlocks reached, shutting down");
+        shutdown(30);
+    } else {
+        speak(`Unlock ${count} of 3`);
+    }
+}
+```
 
 ## Testing Strategy
 
@@ -198,7 +249,7 @@ When writing tests:
 
 **Windows-specific**:
 - `Cargo.toml` includes `windows` crate with session monitoring features
-- `lockscreen_monitor.rs` uses Win32 APIs for session state
+- `screen/monitor.rs` uses Win32 APIs for session state
 - Audio playback uses `rodio` crate
 
 **Cross-platform lockscreen**:
@@ -216,6 +267,5 @@ When writing tests:
 - **Main entry point**: All commands are dispatched through `main.rs` using pattern matching on CLI args
 - **Colored output**: Extensive use of `colored` crate for user feedback (green for success, red for errors, yellow for warnings, blue for info)
 - **Interactive prompts**: Uses `inquire` crate for multi-select, text input, and confirmation dialogs
-- **Task state management**: Adaptive lockscreen uses `Arc<Mutex<LockscreenState>>` for thread-safe state sharing between scheduler and monitor
-- **Async runtime**: Tokio is used for async operations, primarily for Web UI and async TTS
-- **Dual scheduler modes**: Sync version (`scheduler.rs`) for CLI-only, async version (`scheduler_async.rs`) for Web UI support
+- **Rhai scripting**: Task logic is defined in `.rhai` scripts, enabling runtime customization without recompilation
+- **Async runtime**: Tokio is used for async operations, primarily for Web UI

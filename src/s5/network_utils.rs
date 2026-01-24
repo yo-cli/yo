@@ -22,11 +22,11 @@ impl S5NetworkUtils {
     /// 生成随机密码
     pub fn generate_random_password(length: usize) -> String {
         const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         (0..length)
             .map(|_| {
-                let idx = rng.gen_range(0..CHARS.len());
+                let idx = rng.random_range(0..CHARS.len());
                 CHARS[idx] as char
             })
             .collect()
@@ -47,11 +47,11 @@ impl S5NetworkUtils {
 
     /// 查找可用端口
     pub fn find_available_port(start: u16, end: u16) -> Option<u16> {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         // 尝试随机端口 (最多100次)
         for _ in 0..100 {
-            let port = rng.gen_range(start..=end);
+            let port = rng.random_range(start..=end);
             if Self::is_port_available(port) {
                 return Some(port);
             }

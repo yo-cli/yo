@@ -1,4 +1,7 @@
 // 测试嵌入音频自动提取功能
+// 注意：此示例需要在项目为 library crate 时才能运行
+// 目前 yo 是纯 binary crate，无法从 examples 中引用内部模块
+
 use std::path::PathBuf;
 
 fn main() {
@@ -15,34 +18,18 @@ fn main() {
     println!("Expected file location:");
     println!("  {}\n", chime_file.display());
 
-    // 删除旧文件进行测试
+    // 检查文件是否存在
     if chime_file.exists() {
-        println!("Removing existing file for test...");
-        std::fs::remove_file(&chime_file).expect("Failed to remove file");
+        println!("✅ Audio file exists!");
+        println!("   Location: {}", chime_file.display());
+
+        let metadata = std::fs::metadata(&chime_file).unwrap();
+        println!("   Size: {} bytes", metadata.len());
+    } else {
+        println!("⚠ Audio file not found at expected location.");
+        println!("  Run 'yo run auto' once to trigger extraction.");
     }
 
-    println!("Creating TTS client (will trigger extraction)...\n");
-
-    // 创建 TTS 客户端（使用任意 API key，不会真正调用 API）
-    let api_key = "test|test".to_string();
-    let client = yo::auto::tts::VolcengineTtsClient::new(api_key);
-
-    // 调用 hourly_chime 会触发 get_voice_dir，从而提取嵌入的音频
-    match client.hourly_chime(14) {
-        Ok(_) => println!("\n✅ Test passed! Audio extracted and played successfully!"),
-        Err(e) => {
-            // 检查文件是否被提取
-            if chime_file.exists() {
-                println!("\n✅ Audio file extracted successfully!");
-                println!("   Location: {}", chime_file.display());
-
-                let metadata = std::fs::metadata(&chime_file).unwrap();
-                println!("   Size: {} bytes", metadata.len());
-
-                println!("\n⚠ Playback failed (expected in test): {}", e);
-            } else {
-                println!("\n❌ Test failed: {}", e);
-            }
-        }
-    }
+    println!("\nTo test TTS functionality, run:");
+    println!("  yo run ve");
 }

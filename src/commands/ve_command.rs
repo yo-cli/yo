@@ -1,4 +1,3 @@
-use crate::auto::config::ConfigManager;
 use crate::auto::tts::VolcengineTtsClient;
 use colored::Colorize;
 use inquire::{Select, Text};
@@ -23,38 +22,29 @@ impl VeCommand {
         println!("{}", "Interactive TTS synthesis and playback".blue());
         println!();
 
-        // 尝试从配置文件读取 API Key
-        let config = ConfigManager::load_config().ok();
-        let default_api_key = config.and_then(|c| {
-            c.tasks
-                .iter()
-                .find_map(|t| t.tts_api_key.clone())
-        });
+        // 提示用户输入 API Key
+        println!(
+            "{}",
+            "ℹ Please enter your Volcengine API key (format: appid|token)".blue()
+        );
 
-        // 如果没有找到 API Key，提示用户
-        let api_key = if let Some(key) = default_api_key {
-            println!(
-                "{}",
-                format!("✓ Using API key from config: {}...", &key.chars().take(20).collect::<String>())
-                    .green()
-                    .bold()
-            );
-            key
-        } else {
-            println!("{}", "⚠ No API key found in config".yellow());
-            println!("{}", "ℹ Please enter your Volcengine API key (format: appid|token)".blue());
+        let api_key = Text::new("API Key:")
+            .prompt()
+            .map_err(|e| VeError::InputError(format!("Failed to read API key: {}", e)))?;
 
-            Text::new("API Key:")
-                .prompt()
-                .map_err(|e| VeError::InputError(format!("Failed to read API key: {}", e)))?
-        };
+        if api_key.trim().is_empty() {
+            return Err(VeError::InputError("API key cannot be empty".to_string()));
+        }
 
         println!();
 
         // 选择声音类型
         let voices = vec![
             ("zh_female_wanwanxiaohe_moon_bigtts", "湾湾小何（女声）"),
-            ("zh_male_beijingxiaoye_emo_v2_mars_bigtts", "北京小爷（男声）"),
+            (
+                "zh_male_beijingxiaoye_emo_v2_mars_bigtts",
+                "北京小爷（男声）",
+            ),
             ("zh_female_qingxin", "清新女声"),
             ("zh_male_qn_qingse", "青涩男声"),
         ];

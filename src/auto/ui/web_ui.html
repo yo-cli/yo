@@ -1,0 +1,802 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Yo Rhai Scheduler</title>
+    <script src="https://cdn.bootcdn.net/ajax/libs/vue/3.5.13/vue.global.prod.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f5f5f5;
+            color: #333;
+            line-height: 1.6;
+        }
+        .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+        .header {
+            background: linear-gradient(135deg, #42b883, #35495e);
+            color: white;
+            padding: 30px;
+            border-radius: 12px;
+            margin-bottom: 24px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .header h1 { font-size: 24px; }
+        .header p { opacity: 0.9; font-size: 14px; }
+        .tabs {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 20px;
+        }
+        .tab {
+            padding: 10px 20px;
+            background: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.2s;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        }
+        .tab:hover { background: #e8f5e9; }
+        .tab.active { background: #42b883; color: white; }
+        .card {
+            background: white;
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        }
+        .card-title {
+            font-size: 18px;
+            font-weight: 600;
+            margin-bottom: 16px;
+            color: #2c3e50;
+            border-bottom: 2px solid #42b883;
+            padding-bottom: 8px;
+        }
+        .status-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px 0;
+            border-bottom: 1px solid #eee;
+        }
+        .status-row:last-child { border-bottom: none; }
+        .status-label { color: #666; }
+        .status-value { font-weight: 500; color: #2c3e50; }
+        .rule-item {
+            background: #f8f9fa;
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 12px;
+            border-left: 4px solid #42b883;
+        }
+        .rule-name { font-weight: 600; color: #2c3e50; margin-bottom: 8px; }
+        .rule-info { font-size: 13px; color: #666; }
+        .rule-info span { margin-right: 16px; }
+        .rule-disabled { opacity: 0.5; border-left-color: #ccc; }
+        .btn {
+            background: #42b883;
+            color: white;
+            border: none;
+            padding: 10px 24px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background 0.2s;
+        }
+        .btn:hover { background: #3aa876; }
+        .btn:disabled { background: #ccc; cursor: not-allowed; }
+        .btn-secondary {
+            background: #6c757d;
+        }
+        .btn-secondary:hover { background: #5a6268; }
+        .actions { margin-top: 16px; display: flex; gap: 12px; }
+        .tag {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            margin-right: 8px;
+        }
+        .tag-time { background: #e3f2fd; color: #1976d2; }
+        .tag-event { background: #fff3e0; color: #f57c00; }
+        .tag-interval { background: #e8f5e9; color: #388e3c; }
+        .editor-layout {
+            display: grid;
+            grid-template-columns: 250px 1fr;
+            gap: 20px;
+        }
+        .script-list {
+            background: white;
+            border-radius: 12px;
+            padding: 16px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        }
+        .script-list h3 {
+            font-size: 14px;
+            color: #666;
+            margin-bottom: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .script-item {
+            padding: 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            margin-bottom: 4px;
+            transition: all 0.2s;
+            font-size: 14px;
+        }
+        .script-item:hover { background: #f0f0f0; }
+        .script-item.active { background: #e8f5e9; color: #2e7d32; font-weight: 500; }
+        .editor-panel {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        }
+        .editor-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid #eee;
+        }
+        .editor-title {
+            font-size: 16px;
+            font-weight: 600;
+            color: #2c3e50;
+        }
+        .editor-textarea {
+            width: 100%;
+            height: 500px;
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            font-size: 14px;
+            line-height: 1.5;
+            padding: 16px;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            resize: vertical;
+            background: #fafafa;
+        }
+        .editor-textarea:focus {
+            outline: none;
+            border-color: #42b883;
+            background: white;
+        }
+        .toast {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            padding: 12px 24px;
+            border-radius: 8px;
+            color: white;
+            font-size: 14px;
+            z-index: 1000;
+            animation: slideIn 0.3s ease;
+        }
+        .toast-success { background: #42b883; }
+        .toast-error { background: #f44336; }
+        @keyframes slideIn {
+            from { transform: translateX(100%); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+        .empty-state {
+            text-align: center;
+            padding: 40px;
+            color: #999;
+        }
+        .script-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .script-item-content {
+            flex: 1;
+            overflow: hidden;
+            min-width: 0;
+        }
+        .script-item-name {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .script-item-desc {
+            font-size: 11px;
+            color: #999;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            margin-top: 2px;
+        }
+        .btn-delete {
+            background: transparent;
+            color: #999;
+            border: none;
+            padding: 4px 8px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            opacity: 0;
+            transition: all 0.2s;
+        }
+        .script-item:hover .btn-delete {
+            opacity: 1;
+        }
+        .btn-delete:hover {
+            background: #ffebee;
+            color: #f44336;
+        }
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.5);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 2000;
+        }
+        .modal {
+            background: white;
+            border-radius: 12px;
+            padding: 24px;
+            max-width: 400px;
+            width: 90%;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.2);
+        }
+        .modal-title {
+            font-size: 18px;
+            font-weight: 600;
+            margin-bottom: 12px;
+            color: #2c3e50;
+        }
+        .modal-message {
+            color: #666;
+            margin-bottom: 20px;
+            line-height: 1.5;
+        }
+        .modal-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 12px;
+        }
+        .btn-danger {
+            background: #f44336;
+        }
+        .btn-danger:hover {
+            background: #d32f2f;
+        }
+        .btn-cancel {
+            background: #9e9e9e;
+        }
+        .btn-cancel:hover {
+            background: #757575;
+        }
+        /* Settings styles */
+        .env-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px 16px;
+            background: #f8f9fa;
+            border-radius: 8px;
+            margin-bottom: 8px;
+        }
+        .env-key {
+            font-weight: 600;
+            color: #2c3e50;
+            min-width: 150px;
+            font-family: 'Consolas', 'Monaco', monospace;
+        }
+        .env-value {
+            flex: 1;
+            color: #666;
+            font-family: 'Consolas', 'Monaco', monospace;
+            word-break: break-all;
+        }
+        .env-value.masked {
+            color: #999;
+        }
+        .env-actions {
+            display: flex;
+            gap: 8px;
+        }
+        .btn-small {
+            padding: 4px 12px;
+            font-size: 12px;
+        }
+        .add-env-form {
+            display: flex;
+            gap: 12px;
+            margin-top: 16px;
+            padding-top: 16px;
+            border-top: 1px solid #eee;
+        }
+        .add-env-form input {
+            flex: 1;
+            padding: 10px 12px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 14px;
+        }
+        .add-env-form input:focus {
+            outline: none;
+            border-color: #42b883;
+        }
+        .add-env-form input.key-input {
+            max-width: 200px;
+        }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <div class="container">
+            <div class="header">
+                <div>
+                    <h1>Yo Rhai Scheduler</h1>
+                    <p>{{ status.current_time }}</p>
+                </div>
+                <div class="tabs">
+                    <button class="tab" :class="{ active: tab === 'rules' }" @click="tab = 'rules'">
+                        Rules
+                    </button>
+                    <button class="tab" :class="{ active: tab === 'editor' }" @click="tab = 'editor'; loadScripts()">
+                        Editor
+                    </button>
+                    <button class="tab" :class="{ active: tab === 'settings' }" @click="tab = 'settings'; loadConfig()">
+                        Settings
+                    </button>
+                </div>
+            </div>
+
+            <!-- Rules Tab -->
+            <template v-if="tab === 'rules'">
+                <div class="card">
+                    <div class="card-title">Status</div>
+                    <div class="status-row">
+                        <span class="status-label">Current Time</span>
+                        <span class="status-value">{{ status.current_time }}</span>
+                    </div>
+                    <div class="status-row">
+                        <span class="status-label">Loaded Rules</span>
+                        <span class="status-value">{{ status.rules_count }}</span>
+                    </div>
+                    <div class="actions">
+                        <button class="btn" @click="reload" :disabled="loading">
+                            {{ loading ? 'Loading...' : 'Reload Rules' }}
+                        </button>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-title">Rules</div>
+                    <div v-if="rules.length === 0" class="empty-state">
+                        No rules loaded
+                    </div>
+                    <div v-for="rule in rules" :key="rule.name"
+                         class="rule-item" :class="{ 'rule-disabled': !rule.enabled }">
+                        <div class="rule-name">{{ rule.display_name || rule.name }}</div>
+                        <div class="rule-info">
+                            <span v-if="rule.time_range" class="tag tag-time">
+                                {{ rule.time_range[0] }} - {{ rule.time_range[1] }}
+                            </span>
+                            <span v-if="rule.interval_minutes" class="tag tag-interval">
+                                Every {{ rule.interval_minutes }} min
+                            </span>
+                            <span v-for="event in rule.events" :key="event" class="tag tag-event">
+                                {{ event }}
+                            </span>
+                            <span v-if="rule.weekdays">
+                                Days: {{ formatWeekdays(rule.weekdays) }}
+                            </span>
+                        </div>
+                    </div>
+                </div>
+            </template>
+
+            <!-- Editor Tab -->
+            <template v-if="tab === 'editor'">
+                <div class="editor-layout">
+                    <div class="script-list">
+                        <h3>Scripts</h3>
+                        <div v-for="script in scripts" :key="script.name"
+                             class="script-item" :class="{ active: currentScript === script.name }"
+                             @click="loadScript(script.name)" :title="script.filename">
+                            <div class="script-item-content">
+                                <div class="script-item-name">{{ script.display_name || script.filename }}</div>
+                                <div v-if="script.description" class="script-item-desc">{{ script.description }}</div>
+                            </div>
+                            <button class="btn-delete" @click.stop="confirmDelete(script)"
+                                    title="Delete script">X</button>
+                        </div>
+                    </div>
+                    <div class="editor-panel">
+                        <div class="editor-header">
+                            <div class="editor-title">
+                                {{ currentScript ? currentScript + '.rhai' : 'Select a script' }}
+                            </div>
+                            <div class="actions" style="margin: 0;">
+                                <button class="btn" @click="saveScript" :disabled="!currentScript || saving">
+                                    {{ saving ? 'Saving...' : 'Save' }}
+                                </button>
+                                <button class="btn btn-secondary" @click="reloadAndRefresh" :disabled="saving">
+                                    Save & Reload
+                                </button>
+                            </div>
+                        </div>
+                        <textarea v-if="currentScript"
+                                  class="editor-textarea"
+                                  v-model="scriptContent"
+                                  spellcheck="false"></textarea>
+                        <div v-else class="empty-state">
+                            Select a script from the list to edit
+                        </div>
+                    </div>
+                </div>
+            </template>
+
+            <!-- Settings Tab -->
+            <template v-if="tab === 'settings'">
+                <div class="card">
+                    <div class="card-title">Environment Variables</div>
+                    <div v-if="Object.keys(envVars).length === 0" class="empty-state">
+                        No environment variables configured
+                    </div>
+                    <div v-for="(value, key) in envVars" :key="key" class="env-item">
+                        <span class="env-key">{{ key }}</span>
+                        <span class="env-value" :class="{ masked: isSensitive(key) && !showValues[key] }">
+                            {{ isSensitive(key) && !showValues[key] ? maskValue(value) : value }}
+                        </span>
+                        <div class="env-actions">
+                            <button v-if="isSensitive(key)" class="btn btn-small btn-secondary"
+                                    @click="showValues[key] = !showValues[key]">
+                                {{ showValues[key] ? 'Hide' : 'Show' }}
+                            </button>
+                            <button class="btn btn-small btn-danger" @click="confirmDeleteEnv(key)">Delete</button>
+                        </div>
+                    </div>
+                    <div class="add-env-form">
+                        <input v-model="newEnvKey" class="key-input" placeholder="KEY" @keyup.enter="addEnvVar">
+                        <input v-model="newEnvValue" placeholder="Value" @keyup.enter="addEnvVar">
+                        <button class="btn" @click="addEnvVar" :disabled="!newEnvKey || !newEnvValue || savingEnv">
+                            {{ savingEnv ? 'Adding...' : 'Add' }}
+                        </button>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-title">Usage</div>
+                    <p style="color: #666; font-size: 14px; margin-bottom: 12px;">
+                        Environment variables can be accessed in Rhai scripts using:
+                    </p>
+                    <pre style="background: #f5f5f5; padding: 12px; border-radius: 6px; font-size: 13px; overflow-x: auto;">let api_key = get_env("TTS_API_KEY");
+if has_env("TTS_API_KEY") {
+    // ...
+}</pre>
+                </div>
+            </template>
+
+            <!-- Delete Env Confirmation Modal -->
+            <div v-if="deleteEnvModal.show" class="modal-overlay" @click.self="deleteEnvModal.show = false">
+                <div class="modal">
+                    <div class="modal-title">Delete Environment Variable</div>
+                    <div class="modal-message">
+                        Are you sure you want to delete <strong>{{ deleteEnvModal.key }}</strong>?
+                    </div>
+                    <div class="modal-actions">
+                        <button class="btn btn-cancel" @click="deleteEnvModal.show = false">Cancel</button>
+                        <button class="btn btn-danger" @click="deleteEnvVar" :disabled="deletingEnv">
+                            {{ deletingEnv ? 'Deleting...' : 'Delete' }}
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Delete Confirmation Modal -->
+            <div v-if="deleteModal.show" class="modal-overlay" @click.self="deleteModal.show = false">
+                <div class="modal">
+                    <div class="modal-title">Delete Script</div>
+                    <div class="modal-message">
+                        Are you sure you want to delete <strong>{{ deleteModal.script?.filename }}</strong>?
+                        This action cannot be undone.
+                    </div>
+                    <div class="modal-actions">
+                        <button class="btn btn-cancel" @click="deleteModal.show = false">Cancel</button>
+                        <button class="btn btn-danger" @click="deleteScript" :disabled="deleting">
+                            {{ deleting ? 'Deleting...' : 'Delete' }}
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Toast -->
+            <div v-if="toast.show" class="toast" :class="'toast-' + toast.type">
+                {{ toast.message }}
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const { createApp, ref, onMounted, onUnmounted } = Vue;
+
+        createApp({
+            setup() {
+                // State
+                const tab = ref('rules');
+                const status = ref({ current_time: '', rules_count: 0 });
+                const rules = ref([]);
+                const scripts = ref([]);
+                const currentScript = ref('');
+                const scriptContent = ref('');
+                const loading = ref(false);
+                const saving = ref(false);
+                const deleting = ref(false);
+                const toast = ref({ show: false, message: '', type: 'success' });
+                const deleteModal = ref({ show: false, script: null });
+                // Settings state
+                const envVars = ref({});
+                const showValues = ref({});
+                const newEnvKey = ref('');
+                const newEnvValue = ref('');
+                const savingEnv = ref(false);
+                const deletingEnv = ref(false);
+                const deleteEnvModal = ref({ show: false, key: '' });
+
+                let statusInterval = null;
+
+                // Methods
+                const showToast = (message, type = 'success') => {
+                    toast.value = { show: true, message, type };
+                    setTimeout(() => { toast.value.show = false; }, 3000);
+                };
+
+                const fetchStatus = async () => {
+                    try {
+                        const res = await fetch('/api/status');
+                        status.value = await res.json();
+                    } catch (e) {
+                        console.error('Failed to fetch status:', e);
+                    }
+                };
+
+                const fetchRules = async () => {
+                    try {
+                        const res = await fetch('/api/rules');
+                        const data = await res.json();
+                        rules.value = data.rules;
+                    } catch (e) {
+                        console.error('Failed to fetch rules:', e);
+                    }
+                };
+
+                const reload = async () => {
+                    loading.value = true;
+                    try {
+                        const res = await fetch('/api/reload');
+                        status.value = await res.json();
+                        await fetchRules();
+                        showToast('Rules reloaded');
+                    } catch (e) {
+                        showToast('Failed to reload', 'error');
+                    }
+                    loading.value = false;
+                };
+
+                const loadScripts = async () => {
+                    try {
+                        const res = await fetch('/api/scripts');
+                        const data = await res.json();
+                        scripts.value = data.scripts;
+                    } catch (e) {
+                        console.error('Failed to fetch scripts:', e);
+                    }
+                };
+
+                const loadScript = async (name) => {
+                    try {
+                        const res = await fetch(`/api/script/${name}`);
+                        if (res.ok) {
+                            const data = await res.json();
+                            currentScript.value = name;
+                            scriptContent.value = data.content;
+                        }
+                    } catch (e) {
+                        showToast('Failed to load script', 'error');
+                    }
+                };
+
+                const saveScript = async () => {
+                    if (!currentScript.value) return;
+                    saving.value = true;
+                    try {
+                        const res = await fetch(`/api/script/${currentScript.value}`, {
+                            method: 'PUT',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ content: scriptContent.value })
+                        });
+                        const data = await res.json();
+                        if (data.success) {
+                            showToast('Script saved');
+                        } else {
+                            showToast(data.message, 'error');
+                        }
+                    } catch (e) {
+                        showToast('Failed to save script', 'error');
+                    }
+                    saving.value = false;
+                };
+
+                const reloadAndRefresh = async () => {
+                    await saveScript();
+                    await reload();
+                };
+
+                const confirmDelete = (script) => {
+                    deleteModal.value = { show: true, script };
+                };
+
+                const deleteScript = async () => {
+                    if (!deleteModal.value.script) return;
+                    deleting.value = true;
+                    try {
+                        const res = await fetch(`/api/script/${deleteModal.value.script.name}`, {
+                            method: 'DELETE'
+                        });
+                        const data = await res.json();
+                        if (data.success) {
+                            showToast('Script deleted');
+                            // Clear editor if deleted script was being edited
+                            if (currentScript.value === deleteModal.value.script.name) {
+                                currentScript.value = '';
+                                scriptContent.value = '';
+                            }
+                            // Refresh script list
+                            await loadScripts();
+                        } else {
+                            showToast(data.message, 'error');
+                        }
+                    } catch (e) {
+                        showToast('Failed to delete script', 'error');
+                    }
+                    deleting.value = false;
+                    deleteModal.value.show = false;
+                };
+
+                const formatWeekdays = (days) => {
+                    const names = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+                    return days.map(d => names[d - 1]).join(', ');
+                };
+
+                // Config methods
+                const loadConfig = async () => {
+                    try {
+                        const res = await fetch('/api/config');
+                        const data = await res.json();
+                        envVars.value = data.env || {};
+                    } catch (e) {
+                        console.error('Failed to load config:', e);
+                    }
+                };
+
+                const isSensitive = (key) => {
+                    const sensitiveKeys = ['KEY', 'TOKEN', 'SECRET', 'PASSWORD', 'API'];
+                    return sensitiveKeys.some(k => key.toUpperCase().includes(k));
+                };
+
+                const maskValue = (value) => {
+                    if (value.length <= 8) return '********';
+                    return value.substring(0, 4) + '****' + value.substring(value.length - 4);
+                };
+
+                const addEnvVar = async () => {
+                    if (!newEnvKey.value || !newEnvValue.value) return;
+                    savingEnv.value = true;
+                    try {
+                        const res = await fetch('/api/config/env', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ key: newEnvKey.value, value: newEnvValue.value })
+                        });
+                        const data = await res.json();
+                        if (data.success) {
+                            showToast(`Added ${newEnvKey.value}`);
+                            newEnvKey.value = '';
+                            newEnvValue.value = '';
+                            await loadConfig();
+                        } else {
+                            showToast(data.message, 'error');
+                        }
+                    } catch (e) {
+                        showToast('Failed to add environment variable', 'error');
+                    }
+                    savingEnv.value = false;
+                };
+
+                const confirmDeleteEnv = (key) => {
+                    deleteEnvModal.value = { show: true, key };
+                };
+
+                const deleteEnvVar = async () => {
+                    if (!deleteEnvModal.value.key) return;
+                    deletingEnv.value = true;
+                    try {
+                        const res = await fetch('/api/config/env', {
+                            method: 'DELETE',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ key: deleteEnvModal.value.key })
+                        });
+                        const data = await res.json();
+                        if (data.success) {
+                            showToast(`Deleted ${deleteEnvModal.value.key}`);
+                            await loadConfig();
+                        } else {
+                            showToast(data.message, 'error');
+                        }
+                    } catch (e) {
+                        showToast('Failed to delete environment variable', 'error');
+                    }
+                    deletingEnv.value = false;
+                    deleteEnvModal.value.show = false;
+                };
+
+                // Lifecycle
+                onMounted(() => {
+                    fetchStatus();
+                    fetchRules();
+                    statusInterval = setInterval(fetchStatus, 5000);
+                });
+
+                onUnmounted(() => {
+                    if (statusInterval) clearInterval(statusInterval);
+                });
+
+                return {
+                    tab,
+                    status,
+                    rules,
+                    scripts,
+                    currentScript,
+                    scriptContent,
+                    loading,
+                    saving,
+                    deleting,
+                    toast,
+                    deleteModal,
+                    // Settings
+                    envVars,
+                    showValues,
+                    newEnvKey,
+                    newEnvValue,
+                    savingEnv,
+                    deletingEnv,
+                    deleteEnvModal,
+                    // Methods
+                    reload,
+                    loadScripts,
+                    loadScript,
+                    saveScript,
+                    reloadAndRefresh,
+                    confirmDelete,
+                    deleteScript,
+                    formatWeekdays,
+                    loadConfig,
+                    isSensitive,
+                    maskValue,
+                    addEnvVar,
+                    confirmDeleteEnv,
+                    deleteEnvVar
+                };
+            }
+        }).mount('#app');
+    </script>
+</body>
+</html>

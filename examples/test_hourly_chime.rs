@@ -1,4 +1,5 @@
 // 测试整点报时功能（布谷鸟声音 + TTS 报时）
+use chrono::Timelike;
 use std::path::PathBuf;
 
 // 需要手动导入 tts 模块的代码

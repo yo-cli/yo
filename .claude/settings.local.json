@@ -50,7 +50,10 @@
       "Bash(cmd.exe /C start \"\" \"C:\\Users\\DEV\\.yo\\voice\\clock\\Hour_Chime_from_Clock.mp3\")",
       "Bash(echo:*)",
       "Bash(test:*)",
-      "Bash(git checkout:*)"
+      "Bash(git checkout:*)",
+      "Bash(wc:*)",
+      "Bash(done)",
+      "Bash(grep:*)"
     ],
     "deny": [],
     "ask": []
