@@ -31,7 +31,8 @@ impl TaskExecutor {
         );
 
         match task.task_type.as_str() {
-            "lockscreen" | "lockscreen_repeated" => Self::execute_lockscreen(),
+            "lockscreen" => Self::execute_lockscreen(),
+            "lockscreen_repeated" => Self::execute_lockscreen_repeated(task),
             "adaptive_lockscreen" => Self::execute_adaptive_lockscreen(task),
             "command" => {
                 if let Some(ref cmd) = task.command {
@@ -283,6 +284,51 @@ impl TaskExecutor {
         println!(
             "{}",
             format!("🔒 Executing adaptive lockscreen task: {}", task.name)
+                .cyan()
+                .bold()
+        );
+
+        // 0. 检查屏幕是否已锁定
+        if Self::is_screen_locked() {
+            println!(
+                "{}",
+                "ℹ Screen is already locked, skipping TTS and lock".blue()
+            );
+            return Ok(());
+        }
+
+        // 1. 播放 TTS 提示（如果配置了）
+        if let (Some(text), Some(voice), Some(api_key)) =
+            (&task.tts_text, &task.tts_voice, &task.tts_api_key)
+        {
+            println!(
+                "{}",
+                format!("🔊 Playing TTS reminder: \"{}\"", text)
+                    .blue()
+                    .bold()
+            );
+
+            let client = VolcengineTtsClient::new(api_key.clone());
+            if let Err(e) = client.synthesize_and_play(text, voice) {
+                println!(
+                    "{}",
+                    format!("⚠ TTS playback failed: {}", e).yellow()
+                );
+                // TTS 失败不影响锁屏，继续执行
+            }
+        }
+
+        // 2. 执行锁屏
+        Self::execute_lockscreen()?;
+
+        Ok(())
+    }
+
+    /// 执行重复锁屏（TTS + 锁屏，用于 lockscreen_repeated 类型）
+    fn execute_lockscreen_repeated(task: &Task) -> Result<(), ExecutorError> {
+        println!(
+            "{}",
+            format!("🔒 Executing lockscreen_repeated task: {}", task.name)
                 .cyan()
                 .bold()
         );

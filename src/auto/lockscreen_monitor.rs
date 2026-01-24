@@ -241,22 +241,6 @@ impl LockscreenMonitor {
                             tts_voice.as_deref(),
                             "已达到最大解锁次数，下次锁屏将触发关机",
                         );
-                    } else if remaining == 1 {
-                        println!(
-                            "{}",
-                            format!(
-                                "⚠️ [{}] Unlock count: {}/{}. This is your LAST unlock!",
-                                task_name, count, max
-                            )
-                            .yellow()
-                            .bold()
-                        );
-                        // 播放警告
-                        Self::play_warning_tts(
-                            tts_api_key.as_deref(),
-                            tts_voice.as_deref(),
-                            &format!("这是第{}次解锁，再解锁1次将触发关机", count),
-                        );
                     } else {
                         println!(
                             "{}",
@@ -266,6 +250,12 @@ impl LockscreenMonitor {
                             )
                             .yellow()
                             .bold()
+                        );
+                        // 每次解锁都播放剩余次数提醒
+                        Self::play_warning_tts(
+                            tts_api_key.as_deref(),
+                            tts_voice.as_deref(),
+                            &format!("第{}次解锁，再解锁{}次将触发关机", count, remaining),
                         );
                     }
                 } else {
