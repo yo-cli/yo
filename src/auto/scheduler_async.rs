@@ -1,11 +1,15 @@
 use crate::auto::config::Task;
+use crate::auto::lockscreen_monitor::{LockscreenMonitor, MonitorMode};
+use crate::auto::lockscreen_state::StateManager;
 use crate::auto::shared_state::SharedState;
 use crate::auto::task_executor_async::TaskExecutorAsync;
+use crate::auto::tts::VolcengineTtsClient;
 use chrono::{Local, NaiveTime, Timelike};
 use colored::Colorize;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -27,6 +31,7 @@ pub enum SchedulerError {
 pub struct TaskSchedulerAsync {
     state: Arc<RwLock<SharedState>>,
     last_execution: HashMap<String, String>, // task_name -> last_execution_time (YYYY-MM-DD HH:MM)
+    lockscreen_states: HashMap<String, StateManager>, // task_name -> StateManager (for unlock tracking)
 }
 
 impl TaskSchedulerAsync {
@@ -35,9 +40,74 @@ impl TaskSchedulerAsync {
         // 启动时清理 TTS 缓存
         Self::clear_tts_cache();
 
+        let mut lockscreen_states = HashMap::new();
+        let mut has_monitored_tasks = false;
+
+        // 从 SharedState 获取配置，注册需要监控的任务
+        {
+            let shared = state.read().await;
+            for task in &shared.config.tasks {
+                // 为配置了 max_unlocks 的 lockscreen_repeated 任务注册
+                if task.task_type == "lockscreen_repeated" && task.max_unlocks.is_some() {
+                    let initial_interval_seconds = task.interval_minutes * 60;
+
+                    match StateManager::new(task.name.clone(), initial_interval_seconds) {
+                        Ok(state_manager) => {
+                            // 设置 max_unlocks
+                            {
+                                let state_arc = state_manager.get_state_arc();
+                                let mut s = state_arc.lock().unwrap();
+                                s.max_unlocks = task.max_unlocks;
+                            }
+
+                            // 注册到全局监控
+                            LockscreenMonitor::register_task(
+                                task.name.clone(),
+                                state_manager.get_state_arc(),
+                                MonitorMode::Repeated {
+                                    max_unlocks: task.max_unlocks,
+                                    tts_api_key: task.tts_api_key.clone(),
+                                    tts_voice: task.tts_voice.clone(),
+                                },
+                            );
+                            has_monitored_tasks = true;
+
+                            lockscreen_states.insert(task.name.clone(), state_manager);
+                        }
+                        Err(e) => {
+                            println!(
+                                "{}",
+                                format!(
+                                    "⚠ Failed to create state manager for task '{}': {}",
+                                    task.name, e
+                                )
+                                .yellow()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // 如果有需要监控的任务，启动全局监控器
+        if has_monitored_tasks {
+            if let Err(e) = LockscreenMonitor::start_global_monitor() {
+                println!(
+                    "{}",
+                    format!("⚠ Failed to start global monitor: {}", e).yellow()
+                );
+            } else {
+                println!(
+                    "{}",
+                    "✓ Global session monitor started".green().bold()
+                );
+            }
+        }
+
         Ok(Self {
             state,
             last_execution: HashMap::new(),
+            lockscreen_states,
         })
     }
 
@@ -198,6 +268,9 @@ impl TaskSchedulerAsync {
                 last_config_reload_hour = current_hour;
             }
 
+            // 更新时间窗口状态
+            self.update_time_window_state().await;
+
             // 检查并执行任务
             let tasks_to_execute = self.check_tasks_to_execute().await;
 
@@ -208,6 +281,40 @@ impl TaskSchedulerAsync {
                         .cyan()
                         .bold()
                 );
+
+                // 对于 lockscreen_repeated 任务，检查是否需要触发关机
+                if task.task_type == "lockscreen_repeated" && task.shutdown_on_exceed {
+                    // 从 LockscreenState 检查关机状态
+                    let should_shutdown = self.should_trigger_shutdown_for_task(&task.name);
+
+                    if should_shutdown {
+                        println!(
+                            "{}",
+                            format!("🔴 [{}] Maximum unlock count exceeded! Triggering shutdown...", task.name)
+                                .red()
+                                .bold()
+                        );
+
+                        // 播放关机警告语音
+                        if let (Some(api_key), Some(voice)) = (&task.tts_api_key, &task.tts_voice) {
+                            let client = VolcengineTtsClient::new(api_key.clone());
+                            if let Err(e) = client.synthesize_and_play("已超过最大解锁次数，30秒后关机", voice) {
+                                println!(
+                                    "{}",
+                                    format!("⚠ Failed to play shutdown warning TTS: {}", e).yellow()
+                                );
+                            }
+                        }
+
+                        // 执行关机命令
+                        Self::execute_shutdown(30);
+
+                        // 重置状态
+                        self.reset_shutdown_state(&task.name, task.interval_minutes);
+
+                        continue; // 不再执行锁屏
+                    }
+                }
 
                 // 执行任务
                 if let Err(e) = TaskExecutorAsync::execute_task(&task, self.state.clone()).await {
@@ -277,6 +384,157 @@ impl TaskSchedulerAsync {
             current_time >= start_time || current_time < end_time
         } else {
             current_time >= start_time && current_time < end_time
+        }
+    }
+
+    /// 更新时间窗口状态（用于 lockscreen_repeated 任务）
+    async fn update_time_window_state(&mut self) {
+        let now = Local::now();
+        let current_time = now.format("%H:%M").to_string();
+
+        let mut state = self.state.write().await;
+
+        // 查找配置了 max_unlocks 的 lockscreen_repeated 任务
+        for task in &state.config.tasks.clone() {
+            if task.task_type != "lockscreen_repeated" || task.max_unlocks.is_none() {
+                continue;
+            }
+
+            let in_range = Self::is_time_in_range(&current_time, &task.start_time, &task.end_time);
+
+            if in_range && !state.in_lockscreen_window {
+                // 进入时间窗口
+                state.enter_lockscreen_window(&task.name).await;
+
+                // 同步更新 LockscreenState
+                if let Some(state_manager) = self.lockscreen_states.get(&task.name) {
+                    state_manager.enter_time_window();
+                }
+
+                println!(
+                    "{}",
+                    format!("🚪 Entered lockscreen window for task '{}' (unlock tracking enabled)", task.name)
+                        .cyan()
+                        .bold()
+                );
+            } else if !in_range && state.in_lockscreen_window {
+                // 离开时间窗口
+                state.exit_lockscreen_window(&task.name).await;
+
+                // 同步更新 LockscreenState
+                if let Some(state_manager) = self.lockscreen_states.get(&task.name) {
+                    state_manager.exit_time_window(task.interval_minutes * 60);
+                    let _ = state_manager.save();
+                }
+
+                println!(
+                    "{}",
+                    format!("🚪 Exited lockscreen window for task '{}' (counters reset)", task.name)
+                        .cyan()
+                        .bold()
+                );
+            }
+        }
+    }
+
+    /// 检查是否应该触发关机（从 LockscreenState 读取）
+    fn should_trigger_shutdown_for_task(&self, task_name: &str) -> bool {
+        if let Some(state_manager) = self.lockscreen_states.get(task_name) {
+            let state_arc = state_manager.get_state_arc();
+            let s = state_arc.lock().unwrap();
+            s.should_trigger_shutdown()
+        } else {
+            false
+        }
+    }
+
+    /// 重置任务的关机状态
+    fn reset_shutdown_state(&self, task_name: &str, interval_minutes: u32) {
+        if let Some(state_manager) = self.lockscreen_states.get(task_name) {
+            state_manager.exit_time_window(interval_minutes * 60);
+            let _ = state_manager.save();
+        }
+    }
+
+    /// 执行系统关机命令
+    fn execute_shutdown(delay_seconds: u32) {
+        println!(
+            "{}",
+            format!("⚠️ System will shutdown in {} seconds...", delay_seconds)
+                .red()
+                .bold()
+        );
+
+        #[cfg(target_os = "windows")]
+        {
+            let result = Command::new("shutdown")
+                .args(&["/s", "/t", &delay_seconds.to_string()])
+                .spawn();
+
+            match result {
+                Ok(_) => {
+                    println!(
+                        "{}",
+                        format!("✓ Shutdown scheduled in {} seconds", delay_seconds)
+                            .green()
+                            .bold()
+                    );
+                }
+                Err(e) => {
+                    println!(
+                        "{}",
+                        format!("✗ Failed to schedule shutdown: {}", e).red().bold()
+                    );
+                }
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            let result = Command::new("shutdown")
+                .args(&["-h", &format!("+{}", delay_seconds / 60)])
+                .spawn();
+
+            match result {
+                Ok(_) => {
+                    println!(
+                        "{}",
+                        format!("✓ Shutdown scheduled in {} seconds", delay_seconds)
+                            .green()
+                            .bold()
+                    );
+                }
+                Err(e) => {
+                    println!(
+                        "{}",
+                        format!("✗ Failed to schedule shutdown: {}", e).red().bold()
+                    );
+                }
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            let result = Command::new("sudo")
+                .args(&["shutdown", "-h", &format!("+{}", delay_seconds / 60)])
+                .spawn();
+
+            match result {
+                Ok(_) => {
+                    println!(
+                        "{}",
+                        format!("✓ Shutdown scheduled in {} seconds", delay_seconds)
+                            .green()
+                            .bold()
+                    );
+                }
+                Err(e) => {
+                    println!(
+                        "{}",
+                        format!("✗ Failed to schedule shutdown: {}", e).red().bold()
+                    );
+                }
+            }
         }
     }
 

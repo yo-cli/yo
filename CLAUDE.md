@@ -72,6 +72,11 @@ yo run auto --web
 # Task scheduler with Web UI on custom port
 yo run auto --web 8080
 
+# Windows autostart management (adds VBS script to Startup folder)
+yo run auto --web --autostart           # Install autostart and start Web UI
+yo run auto --web --autostart remove    # Remove autostart
+yo run auto --web --autostart status    # Show autostart status
+
 # Template cloning with keyword replacement
 yo run clone
 
@@ -121,6 +126,8 @@ The codebase follows a domain-driven structure with 5 main modules:
    - `tts_async.rs` - Async version for Web UI integration
    - `shared_state.rs` - Thread-safe state sharing between scheduler and web server
    - `web_server.rs` - Axum-based web server for task management UI
+   - `autostart.rs` - Windows autostart management (VBS script in Startup folder)
+   - `instance_lock.rs` - Single instance enforcement via PID file lock
 
 5. **`common/`** - Shared utilities
    - `crypto_utils.rs` - AES-256-CBC encryption using machine-specific MAC address as key derivation input
@@ -138,10 +145,17 @@ The codebase follows a domain-driven structure with 5 main modules:
 - Supports time range crossing midnight (e.g., 22:00-06:00)
 - Task types: `lockscreen_repeated`, `command`, `tts_command`, `adaptive_lockscreen`, `hourly_chime`
 - Adaptive lockscreen: dynamically adjusts interval based on user unlock behavior
+- Optional `max_unlocks` + `shutdown_on_exceed` for forced shutdown after repeated unlocks
 - Windows: Uses `WTSRegisterSessionNotification` for lockscreen detection
 - Hourly config reload at minute 0 for dynamic updates
 - State persistence via `~/.yo/state_{task_name}.json` for adaptive tasks
 - Web UI: Optional Axum-based server for real-time task monitoring and control
+- Single instance: PID-based lock prevents multiple scheduler instances
+
+**Windows Autostart**:
+- Creates VBS script in `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`
+- Script launches Git Bash with `yo run auto --web` command
+- Auto-detects Git Bash via registry, common paths, or PATH environment
 
 **Template Cloning Flow** (`clone_command.rs`):
 1. Interactive prompts for source directory and keywords
@@ -166,9 +180,11 @@ The codebase follows a domain-driven structure with 5 main modules:
 
 - `~/.yo/auto_config.json` - Task scheduler configuration (created on first run with default night_lockscreen task)
 - `~/.yo/state_{task_name}.json` - Per-task state for adaptive_lockscreen tasks
+- `~/.yo/yo-auto.pid` - PID file for single instance lock (auto command)
 - `~/.yo/github_token.enc` - Encrypted GitHub personal access token
 - `~/.ssh/config` - Modified by `init` command to add deploy key aliases
 - `voice/` directory - Generated TTS audio files for tts_command tasks
+- `%APPDATA%\...\Startup\yo-auto-web.vbs` - Windows autostart script (when installed)
 
 ## Testing Strategy
 
@@ -199,6 +215,7 @@ When writing tests:
 - **SSH keys**: Always generates Ed25519 (not RSA) for better security and performance
 - **Main entry point**: All commands are dispatched through `main.rs` using pattern matching on CLI args
 - **Colored output**: Extensive use of `colored` crate for user feedback (green for success, red for errors, yellow for warnings, blue for info)
+- **Interactive prompts**: Uses `inquire` crate for multi-select, text input, and confirmation dialogs
 - **Task state management**: Adaptive lockscreen uses `Arc<Mutex<LockscreenState>>` for thread-safe state sharing between scheduler and monitor
 - **Async runtime**: Tokio is used for async operations, primarily for Web UI and async TTS
 - **Dual scheduler modes**: Sync version (`scheduler.rs`) for CLI-only, async version (`scheduler_async.rs`) for Web UI support

@@ -16,15 +16,23 @@ pub struct PauseState {
     pub pause_until: Option<DateTime<Local>>,
     /// 什么时候暂停的
     pub paused_at: Option<DateTime<Local>>,
+    /// 当前时间窗口内的暂停次数
+    #[serde(default)]
+    pub pause_count: u32,
+    /// 时间窗口开始时间（用于重置计数）
+    #[serde(default)]
+    pub window_start: Option<DateTime<Local>>,
 }
 
 impl PauseState {
-    /// 暂停 N 分钟
-    pub fn pause(&mut self, minutes: u32) {
+    /// 暂停 N 分钟（返回当前暂停次数）
+    pub fn pause(&mut self, minutes: u32) -> u32 {
         let now = Local::now();
         self.paused = true;
         self.paused_at = Some(now);
         self.pause_until = Some(now + chrono::Duration::minutes(minutes as i64));
+        self.pause_count += 1;
+        self.pause_count
     }
 
     /// 恢复运行
@@ -32,6 +40,17 @@ impl PauseState {
         self.paused = false;
         self.pause_until = None;
         self.paused_at = None;
+    }
+
+    /// 重置暂停计数（进入新的时间窗口时调用）
+    pub fn reset_pause_count(&mut self) {
+        self.pause_count = 0;
+        self.window_start = Some(Local::now());
+    }
+
+    /// 获取暂停次数
+    pub fn get_pause_count(&self) -> u32 {
+        self.pause_count
     }
 
     /// 检查是否暂停
@@ -89,6 +108,21 @@ pub struct OperationLog {
     pub details: String,
 }
 
+/// 关机警告状态
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ShutdownWarning {
+    /// 是否即将关机
+    pub pending: bool,
+    /// 原因（unlock_exceeded 或 pause_exceeded）
+    pub reason: Option<String>,
+    /// 当前解锁/暂停次数
+    pub current_count: u32,
+    /// 最大允许次数
+    pub max_count: u32,
+    /// 相关任务名称
+    pub task_name: Option<String>,
+}
+
 /// 共享状态
 #[derive(Debug, Clone)]
 pub struct SharedState {
@@ -100,6 +134,12 @@ pub struct SharedState {
     pub operation_logs: VecDeque<OperationLog>,
     /// 配置
     pub config: AutoConfig,
+    /// 解锁计数（任务名 -> 计数）
+    pub unlock_counts: std::collections::HashMap<String, u32>,
+    /// 关机警告状态
+    pub shutdown_warning: ShutdownWarning,
+    /// 是否在锁屏时间窗口内
+    pub in_lockscreen_window: bool,
 }
 
 impl SharedState {
@@ -114,15 +154,43 @@ impl SharedState {
             task_history,
             operation_logs: VecDeque::new(),
             config,
+            unlock_counts: std::collections::HashMap::new(),
+            shutdown_warning: ShutdownWarning::default(),
+            in_lockscreen_window: false,
         }
     }
 
     /// 暂停 N 分钟
-    pub async fn pause(&mut self, minutes: u32) {
-        self.pause_state.pause(minutes);
+    /// 返回 (暂停次数, 是否超过限制)
+    pub async fn pause(&mut self, minutes: u32) -> (u32, bool) {
+        let pause_count = self.pause_state.pause(minutes);
         let _ = self.save_pause_state().await;
-        self.log_operation("pause", &format!("User paused for {} minutes", minutes))
-            .await;
+
+        // 检查是否在锁屏任务的时间窗口内，并且暂停次数超过 2 次
+        let max_pauses = 2u32;
+        let exceeded = self.in_lockscreen_window && pause_count > max_pauses;
+
+        if exceeded {
+            // 设置关机警告
+            self.shutdown_warning = ShutdownWarning {
+                pending: true,
+                reason: Some("pause_exceeded".to_string()),
+                current_count: pause_count,
+                max_count: max_pauses,
+                task_name: None,
+            };
+            self.log_operation("pause_exceeded", &format!(
+                "Pause count ({}) exceeded limit ({}), shutdown will be triggered",
+                pause_count, max_pauses
+            )).await;
+        } else {
+            self.log_operation("pause", &format!(
+                "User paused for {} minutes (count: {}/{})",
+                minutes, pause_count, max_pauses
+            )).await;
+        }
+
+        (pause_count, exceeded)
     }
 
     /// 恢复运行
@@ -173,6 +241,74 @@ impl SharedState {
             self.log_operation("config_reload", "Configuration reloaded")
                 .await;
         }
+    }
+
+    /// 进入锁屏时间窗口
+    pub async fn enter_lockscreen_window(&mut self, task_name: &str) {
+        if !self.in_lockscreen_window {
+            self.in_lockscreen_window = true;
+            self.pause_state.reset_pause_count();
+            self.unlock_counts.insert(task_name.to_string(), 0);
+            self.shutdown_warning = ShutdownWarning::default();
+            self.log_operation("enter_window", &format!(
+                "Entered lockscreen time window for task '{}'",
+                task_name
+            )).await;
+        }
+    }
+
+    /// 离开锁屏时间窗口
+    pub async fn exit_lockscreen_window(&mut self, task_name: &str) {
+        if self.in_lockscreen_window {
+            self.in_lockscreen_window = false;
+            self.pause_state.reset_pause_count();
+            self.unlock_counts.remove(task_name);
+            self.shutdown_warning = ShutdownWarning::default();
+            self.log_operation("exit_window", &format!(
+                "Exited lockscreen time window for task '{}', counters reset",
+                task_name
+            )).await;
+        }
+    }
+
+    /// 记录解锁（用于 lockscreen_repeated 任务）
+    /// 返回 (解锁次数, 是否超过限制)
+    #[allow(dead_code)]
+    pub fn record_unlock(&mut self, task_name: &str, max_unlocks: u32) -> (u32, bool) {
+        let count = self.unlock_counts.entry(task_name.to_string()).or_insert(0);
+        *count += 1;
+        let current = *count;
+        let exceeded = current >= max_unlocks;
+
+        if exceeded {
+            self.shutdown_warning = ShutdownWarning {
+                pending: true,
+                reason: Some("unlock_exceeded".to_string()),
+                current_count: current,
+                max_count: max_unlocks,
+                task_name: Some(task_name.to_string()),
+            };
+        }
+
+        (current, exceeded)
+    }
+
+    /// 获取关机警告状态
+    #[allow(dead_code)]
+    pub fn get_shutdown_warning(&self) -> &ShutdownWarning {
+        &self.shutdown_warning
+    }
+
+    /// 清除关机警告
+    #[allow(dead_code)]
+    pub fn clear_shutdown_warning(&mut self) {
+        self.shutdown_warning = ShutdownWarning::default();
+    }
+
+    /// 检查是否应该触发关机
+    #[allow(dead_code)]
+    pub fn should_trigger_shutdown(&self) -> bool {
+        self.shutdown_warning.pending
     }
 
     // ===== 文件操作 =====

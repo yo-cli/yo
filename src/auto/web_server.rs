@@ -12,7 +12,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use super::config::Task;
-use super::shared_state::{OperationLog, SharedState, TaskExecution};
+use super::shared_state::{OperationLog, SharedState, ShutdownWarning, TaskExecution};
 
 /// 应用状态（共享）
 pub type AppState = Arc<RwLock<SharedState>>;
@@ -24,6 +24,10 @@ pub struct StatusResponse {
     pub pause_until: Option<DateTime<Local>>,
     pub remaining_seconds: Option<i64>,
     pub current_time: DateTime<Local>,
+    pub pause_count: u32,
+    pub max_pauses: u32,
+    pub in_lockscreen_window: bool,
+    pub shutdown_warning: ShutdownWarning,
 }
 
 /// 暂停请求
@@ -37,6 +41,10 @@ pub struct PauseRequest {
 pub struct SuccessResponse {
     pub success: bool,
     pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pause_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shutdown_triggered: Option<bool>,
 }
 
 /// 任务列表响应
@@ -64,12 +72,20 @@ pub struct UpcomingTask {
     pub task_type: String,
     pub execute_at: DateTime<Local>,
     pub seconds_until: i64,
+    /// 是否会触发关机
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub will_trigger_shutdown: Option<bool>,
+    /// 关机警告消息
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shutdown_warning_message: Option<String>,
 }
 
 /// 即将执行的任务列表响应
 #[derive(Debug, Serialize)]
 pub struct UpcomingTasksResponse {
     pub upcoming: Vec<UpcomingTask>,
+    /// 全局关机警告
+    pub shutdown_warning: ShutdownWarning,
 }
 
 /// 启动 Web 服务器
@@ -105,6 +121,10 @@ async fn get_status(State(state): State<AppState>) -> Json<StatusResponse> {
         pause_until: state.pause_state.pause_until,
         remaining_seconds: state.pause_state.remaining_seconds(),
         current_time: Local::now(),
+        pause_count: state.pause_state.get_pause_count(),
+        max_pauses: 2, // 最大暂停次数
+        in_lockscreen_window: state.in_lockscreen_window,
+        shutdown_warning: state.shutdown_warning.clone(),
     })
 }
 
@@ -118,11 +138,22 @@ async fn post_pause(
     }
 
     let mut state = state.write().await;
-    state.pause(req.minutes).await;
+    let (pause_count, exceeded) = state.pause(req.minutes).await;
+
+    let message = if exceeded {
+        format!(
+            "Paused for {} minutes. WARNING: Pause limit exceeded ({}/2), shutdown will be triggered!",
+            req.minutes, pause_count
+        )
+    } else {
+        format!("Paused for {} minutes (count: {}/2)", req.minutes, pause_count)
+    };
 
     Ok(Json(SuccessResponse {
         success: true,
-        message: Some(format!("Paused for {} minutes", req.minutes)),
+        message: Some(message),
+        pause_count: Some(pause_count),
+        shutdown_triggered: Some(exceeded),
     }))
 }
 
@@ -134,6 +165,8 @@ async fn post_resume(State(state): State<AppState>) -> Json<SuccessResponse> {
     Json(SuccessResponse {
         success: true,
         message: Some("Resumed".to_string()),
+        pause_count: None,
+        shutdown_triggered: None,
     })
 }
 
@@ -165,6 +198,10 @@ async fn get_upcoming(State(state): State<AppState>) -> Json<UpcomingTasksRespon
     let now = Local::now();
     let mut upcoming_tasks = Vec::new();
 
+    // 检查是否有关机警告
+    let shutdown_warning = state.shutdown_warning.clone();
+    let has_shutdown_warning = shutdown_warning.pending;
+
     // 遍历所有启用的任务
     for task in &state.config.tasks {
         if !task.enabled {
@@ -176,11 +213,33 @@ async fn get_upcoming(State(state): State<AppState>) -> Json<UpcomingTasksRespon
             for next_time in next_times {
                 let seconds_until = (next_time - now).num_seconds();
                 if seconds_until > 0 {
+                    // 检查这个任务是否会触发关机
+                    let (will_trigger, warning_msg) = if has_shutdown_warning
+                        && (task.task_type == "lockscreen_repeated" || task.task_type == "lockscreen")
+                    {
+                        let msg = match shutdown_warning.reason.as_deref() {
+                            Some("unlock_exceeded") => Some(format!(
+                                "⚠️ 解锁次数已达上限 ({}/{}), 此任务将触发关机!",
+                                shutdown_warning.current_count, shutdown_warning.max_count
+                            )),
+                            Some("pause_exceeded") => Some(format!(
+                                "⚠️ 暂停次数已超限 ({}/{}), 此任务将触发关机!",
+                                shutdown_warning.current_count, shutdown_warning.max_count
+                            )),
+                            _ => Some("⚠️ 此任务将触发关机!".to_string()),
+                        };
+                        (Some(true), msg)
+                    } else {
+                        (None, None)
+                    };
+
                     upcoming_tasks.push(UpcomingTask {
                         task_name: task.name.clone(),
                         task_type: task.task_type.clone(),
                         execute_at: next_time,
                         seconds_until,
+                        will_trigger_shutdown: will_trigger,
+                        shutdown_warning_message: warning_msg,
                     });
                 }
             }
@@ -195,6 +254,7 @@ async fn get_upcoming(State(state): State<AppState>) -> Json<UpcomingTasksRespon
 
     Json(UpcomingTasksResponse {
         upcoming: upcoming_tasks,
+        shutdown_warning,
     })
 }
 

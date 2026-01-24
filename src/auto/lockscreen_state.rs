@@ -41,6 +41,12 @@ pub struct LockscreenState {
     pub window_start_time: Option<DateTime<Local>>,
     /// 任务名称（用于区分不同时间段的任务）
     pub task_name: String,
+    /// 是否应该触发关机（解锁次数超限后下次锁屏时执行）
+    #[serde(default)]
+    pub should_shutdown: bool,
+    /// 最大解锁次数限制（None 表示无限制）
+    #[serde(default)]
+    pub max_unlocks: Option<u32>,
 }
 
 impl Default for LockscreenState {
@@ -53,6 +59,8 @@ impl Default for LockscreenState {
             in_time_window: false,
             window_start_time: None,
             task_name: String::new(),
+            should_shutdown: false,
+            max_unlocks: None,
         }
     }
 }
@@ -68,6 +76,24 @@ impl LockscreenState {
             in_time_window: false,
             window_start_time: None,
             task_name,
+            should_shutdown: false,
+            max_unlocks: None,
+        }
+    }
+
+    /// 创建带解锁限制的新状态（用于 lockscreen_repeated）
+    #[allow(dead_code)]
+    pub fn new_with_max_unlocks(task_name: String, initial_interval_seconds: u32, max_unlocks: Option<u32>) -> Self {
+        Self {
+            unlock_count: 0,
+            current_interval_seconds: initial_interval_seconds,
+            last_lock_time: None,
+            last_unlock_time: None,
+            in_time_window: false,
+            window_start_time: None,
+            task_name,
+            should_shutdown: false,
+            max_unlocks,
         }
     }
 
@@ -86,6 +112,7 @@ impl LockscreenState {
         self.unlock_count = 0;
         self.current_interval_seconds = initial_interval_seconds;
         self.window_start_time = None;
+        self.should_shutdown = false;
     }
 
     /// 记录锁屏
@@ -93,7 +120,7 @@ impl LockscreenState {
         self.last_lock_time = Some(Local::now());
     }
 
-    /// 记录解锁（减半间隔）
+    /// 记录解锁（减半间隔，用于 adaptive_lockscreen）
     #[allow(dead_code)]
     pub fn record_unlock(&mut self, min_interval_seconds: u32) {
         self.last_unlock_time = Some(Local::now());
@@ -102,6 +129,34 @@ impl LockscreenState {
         // 减半当前间隔
         let new_interval = self.current_interval_seconds / 2;
         self.current_interval_seconds = new_interval.max(min_interval_seconds);
+    }
+
+    /// 记录解锁（简单计数，用于 lockscreen_repeated）
+    /// 返回 (当前解锁次数, 是否达到最大次数)
+    pub fn record_unlock_simple(&mut self) -> (u32, bool) {
+        self.last_unlock_time = Some(Local::now());
+        self.unlock_count += 1;
+
+        // 检查是否达到最大解锁次数
+        if let Some(max) = self.max_unlocks {
+            if self.unlock_count >= max {
+                self.should_shutdown = true;
+                return (self.unlock_count, true);
+            }
+        }
+
+        (self.unlock_count, false)
+    }
+
+    /// 检查是否应该关机
+    pub fn should_trigger_shutdown(&self) -> bool {
+        self.should_shutdown
+    }
+
+    /// 获取剩余解锁次数
+    #[allow(dead_code)]
+    pub fn remaining_unlocks(&self) -> Option<u32> {
+        self.max_unlocks.map(|max| max.saturating_sub(self.unlock_count))
     }
 
     /// 获取当前间隔（秒）

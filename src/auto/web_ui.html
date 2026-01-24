@@ -336,6 +336,77 @@
             color: #6c757d;
         }
 
+        .shutdown-warning {
+            background: linear-gradient(135deg, #dc3545 0%, #c82333 100%);
+            color: white;
+            padding: 16px 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(220, 53, 69, 0.3);
+            animation: warning-pulse 1.5s infinite;
+        }
+
+        @keyframes warning-pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.85; }
+        }
+
+        .shutdown-warning h3 {
+            margin-bottom: 8px;
+            font-size: 18px;
+        }
+
+        .shutdown-warning p {
+            font-size: 14px;
+            opacity: 0.95;
+        }
+
+        .pause-count {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            margin-left: 12px;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .pause-count.warning {
+            background: #fff3cd;
+            color: #856404;
+        }
+
+        .pause-count.danger {
+            background: #f8d7da;
+            color: #721c24;
+        }
+
+        .pause-count.normal {
+            background: #e9ecef;
+            color: #495057;
+        }
+
+        .upcoming-item.shutdown-trigger {
+            border-left-color: #dc3545;
+            background: #fff5f5;
+        }
+
+        .upcoming-item.shutdown-trigger .upcoming-name {
+            color: #dc3545;
+        }
+
+        .shutdown-badge {
+            background: #dc3545;
+            color: white;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 600;
+            margin-left: 8px;
+            animation: warning-pulse 1s infinite;
+        }
+
         .language-switcher {
             position: absolute;
             top: 20px;
@@ -400,9 +471,26 @@
                 <p>{{ t('subtitle') }}</p>
             </div>
 
+            <!-- 关机警告横幅 -->
+            <div class="shutdown-warning" v-if="status.shutdown_warning && status.shutdown_warning.pending">
+                <h3>⚠️ {{ t('shutdownWarning') }}</h3>
+                <p v-if="status.shutdown_warning.reason === 'pause_exceeded'">
+                    {{ t('pauseExceeded') }} ({{ status.shutdown_warning.current_count }}/{{ status.shutdown_warning.max_count }})
+                </p>
+                <p v-else-if="status.shutdown_warning.reason === 'unlock_exceeded'">
+                    {{ t('unlockExceeded') }} ({{ status.shutdown_warning.current_count }}/{{ status.shutdown_warning.max_count }})
+                </p>
+                <p>{{ t('nextLockscreenShutdown') }}</p>
+            </div>
+
             <!-- 状态面板 -->
             <div class="card">
-                <div class="card-title">{{ t('status') }}</div>
+                <div class="card-title" style="display: flex; justify-content: space-between; align-items: center;">
+                    <span>{{ t('status') }}</span>
+                    <span v-if="status.in_lockscreen_window" :class="['pause-count', pauseCountClass]">
+                        🛑 {{ t('pauseCount') }}: {{ status.pause_count }}/{{ status.max_pauses }}
+                    </span>
+                </div>
                 <div :class="['status-badge', status.paused ? 'status-paused' : 'status-running']">
                     <span class="status-indicator"></span>
                     <span v-if="status.paused">⏸ {{ t('paused') }} ({{ t('remaining') }} {{ formatTime(status.remaining_seconds) }})</span>
@@ -435,12 +523,18 @@
             <div class="card">
                 <div class="card-title">⏰ {{ t('upcomingTasks') }}</div>
                 <ul class="upcoming-list" v-if="upcoming.length > 0">
-                    <li v-for="(item, index) in upcoming" :key="index" class="upcoming-item">
-                        <div class="upcoming-time">{{ formatDateTime(item.execute_at) }}</div>
+                    <li v-for="(item, index) in upcoming" :key="index" :class="['upcoming-item', { 'shutdown-trigger': item.will_trigger_shutdown }]">
+                        <div class="upcoming-time">
+                            {{ formatDateTime(item.execute_at) }}
+                            <span v-if="item.will_trigger_shutdown" class="shutdown-badge">⚠️ {{ t('willShutdown') }}</span>
+                        </div>
                         <div class="upcoming-info">
                             <span class="upcoming-name">{{ item.task_name }}</span>
                             <span class="upcoming-type">({{ item.task_type }})</span>
                             <span class="upcoming-countdown">{{ formatCountdown(item.seconds_until) }}</span>
+                        </div>
+                        <div v-if="item.shutdown_warning_message" style="color: #dc3545; font-size: 12px; margin-top: 4px;">
+                            {{ item.shutdown_warning_message }}
                         </div>
                     </li>
                 </ul>
@@ -544,6 +638,12 @@
                 noLogs: '暂无操作日志',
                 stillHave: '还有',
                 seconds: '秒',
+                pauseCount: '暂停次数',
+                shutdownWarning: '关机警告',
+                pauseExceeded: '暂停次数已超限',
+                unlockExceeded: '解锁次数已超限',
+                nextLockscreenShutdown: '下次锁屏任务将触发系统关机！',
+                willShutdown: '将关机',
             },
             en: {
                 title: 'Yo Auto Scheduler',
@@ -574,6 +674,12 @@
                 noLogs: 'No operation logs',
                 stillHave: '',
                 seconds: 's',
+                pauseCount: 'Pause Count',
+                shutdownWarning: 'Shutdown Warning',
+                pauseExceeded: 'Pause limit exceeded',
+                unlockExceeded: 'Unlock limit exceeded',
+                nextLockscreenShutdown: 'Next lockscreen task will trigger system shutdown!',
+                willShutdown: 'Shutdown',
             }
         };
 
@@ -585,7 +691,11 @@
                         paused: false,
                         pause_until: null,
                         remaining_seconds: null,
-                        current_time: new Date().toISOString()
+                        current_time: new Date().toISOString(),
+                        pause_count: 0,
+                        max_pauses: 2,
+                        in_lockscreen_window: false,
+                        shutdown_warning: { pending: false }
                     },
                     tasks: [],
                     history: [],
@@ -593,6 +703,16 @@
                     upcoming: [],
                     customMinutes: null
                 };
+            },
+            computed: {
+                pauseCountClass() {
+                    if (this.status.pause_count >= this.status.max_pauses) {
+                        return 'danger';
+                    } else if (this.status.pause_count >= this.status.max_pauses - 1) {
+                        return 'warning';
+                    }
+                    return 'normal';
+                }
             },
             methods: {
                 async fetchStatus() {

@@ -1,5 +1,7 @@
 use crate::auto::lockscreen_state::LockscreenState;
+use crate::auto::tts::VolcengineTtsClient;
 use colored::Colorize;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use thiserror::Error;
@@ -14,39 +16,56 @@ pub enum MonitorError {
     WindowsApiError(String),
 }
 
-/// Windows 锁屏监控器
-pub struct LockscreenMonitor {
-    state: Arc<Mutex<LockscreenState>>,
-    min_interval_seconds: u32,
-    is_running: Arc<Mutex<bool>>,
+/// 监控器模式
+#[derive(Debug, Clone)]
+pub enum MonitorMode {
+    /// 自适应锁屏模式（减半间隔）
+    Adaptive { min_interval_seconds: u32 },
+    /// 重复锁屏模式（简单计数，可触发关机）
+    Repeated {
+        max_unlocks: Option<u32>,
+        tts_api_key: Option<String>,
+        tts_voice: Option<String>,
+    },
 }
 
+/// 任务监控信息
+#[derive(Clone)]
+struct TaskMonitorInfo {
+    state: Arc<Mutex<LockscreenState>>,
+    mode: MonitorMode,
+}
+
+/// Windows 锁屏监控器
+pub struct LockscreenMonitor;
+
 impl LockscreenMonitor {
-    /// 创建新的监控器
-    pub fn new(state: Arc<Mutex<LockscreenState>>, min_interval_seconds: u32) -> Self {
-        Self {
-            state,
-            min_interval_seconds,
-            is_running: Arc::new(Mutex::new(false)),
-        }
+    /// 注册任务到全局监控
+    pub fn register_task(
+        task_name: String,
+        state: Arc<Mutex<LockscreenState>>,
+        mode: MonitorMode,
+    ) {
+        let mut tasks = MONITOR_TASKS.lock().unwrap();
+        tasks.insert(task_name.clone(), TaskMonitorInfo { state, mode });
+        println!(
+            "{}",
+            format!("  📝 Registered task '{}' for unlock monitoring", task_name)
+                .blue()
+        );
     }
 
-    /// 启动监控（在后台线程）
-    pub fn start(&self) -> Result<(), MonitorError> {
-        let state = Arc::clone(&self.state);
-        let min_interval = self.min_interval_seconds;
-        let is_running = Arc::clone(&self.is_running);
-
-        {
-            let mut running = is_running.lock().unwrap();
-            if *running {
-                return Ok(()); // 已经在运行
-            }
-            *running = true;
+    /// 启动全局监控（只启动一次）
+    pub fn start_global_monitor() -> Result<(), MonitorError> {
+        let mut started = MONITOR_STARTED.lock().unwrap();
+        if *started {
+            return Ok(()); // 已经启动
         }
+        *started = true;
+        drop(started);
 
         thread::spawn(move || {
-            Self::monitor_loop(state, min_interval, is_running);
+            Self::monitor_loop();
         });
 
         Ok(())
@@ -54,11 +73,7 @@ impl LockscreenMonitor {
 
     /// 监控循环（Windows 平台）
     #[cfg(target_os = "windows")]
-    fn monitor_loop(
-        state: Arc<Mutex<LockscreenState>>,
-        min_interval_seconds: u32,
-        is_running: Arc<Mutex<bool>>,
-    ) {
+    fn monitor_loop() {
         use windows::Win32::System::RemoteDesktop::{
             WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
         };
@@ -119,14 +134,6 @@ impl LockscreenMonitor {
 
             println!("{}", "✓ Windows session monitor started successfully".green().bold());
 
-            // 消息循环
-            let state_clone = Arc::clone(&state);
-            let min_interval = min_interval_seconds;
-
-            // 设置窗口的用户数据，存储 state 和 min_interval
-            // 注意：这里使用全局变量或其他方式传递状态
-            MONITOR_STATE.lock().unwrap().replace((state_clone, min_interval));
-
             let mut msg = MSG::default();
             while GetMessageW(&mut msg, HWND(0), 0, 0).as_bool() {
                 TranslateMessage(&msg);
@@ -135,7 +142,6 @@ impl LockscreenMonitor {
 
             // 清理
             WTSUnRegisterSessionNotification(hwnd).ok();
-            *is_running.lock().unwrap() = false;
         }
     }
 
@@ -157,67 +163,153 @@ impl LockscreenMonitor {
         if msg == WM_WTSSESSION_CHANGE {
             let event = wparam.0 as u32;
 
-            if let Some((state, min_interval)) = MONITOR_STATE.lock().unwrap().as_ref() {
-                let state = Arc::clone(state);
-                let min_interval = *min_interval;
+            match event {
+                WTS_SESSION_LOCK => {
+                    // 锁屏事件
+                    println!("{}", "🔒 Screen locked detected".yellow().bold());
+                }
+                WTS_SESSION_UNLOCK => {
+                    // 解锁事件 - 遍历所有注册的任务，找到活跃的任务
+                    let tasks = MONITOR_TASKS.lock().unwrap();
+                    let mut found_active = false;
 
-                match event {
-                    WTS_SESSION_LOCK => {
-                        // 锁屏事件
-                        println!("{}", "🔒 Screen locked detected".yellow().bold());
-                    }
-                    WTS_SESSION_UNLOCK => {
-                        // 解锁事件 - 只在时间窗口内记录
+                    for (task_name, info) in tasks.iter() {
                         let in_window = {
-                            let s = state.lock().unwrap();
+                            let s = info.state.lock().unwrap();
                             s.in_time_window
                         };
 
                         if in_window {
-                            let mut s = state.lock().unwrap();
-                            s.record_unlock(min_interval);
-                            println!(
-                                "{}",
-                                format!(
-                                    "🔓 Screen unlocked detected! Unlock count: {}, New interval: {} seconds",
-                                    s.unlock_count,
-                                    s.current_interval_seconds
-                                )
-                                .yellow()
-                                .bold()
-                            );
-                        } else {
-                            println!("{}", "🔓 Screen unlocked detected (outside time window, not counted)".blue());
+                            found_active = true;
+                            Self::handle_unlock_for_task(task_name, info);
                         }
                     }
-                    _ => {}
+
+                    if !found_active {
+                        println!("{}", "🔓 Screen unlocked (no active task in time window)".blue());
+                    }
                 }
+                _ => {}
             }
         }
 
         DefWindowProcW(hwnd, msg, wparam, lparam)
     }
 
+    /// 处理单个任务的解锁事件
+    fn handle_unlock_for_task(task_name: &str, info: &TaskMonitorInfo) {
+        match &info.mode {
+            MonitorMode::Adaptive { min_interval_seconds } => {
+                // 自适应模式：减半间隔
+                let mut s = info.state.lock().unwrap();
+                s.record_unlock(*min_interval_seconds);
+                println!(
+                    "{}",
+                    format!(
+                        "🔓 [{}] Unlock count: {}, New interval: {} seconds",
+                        task_name,
+                        s.unlock_count,
+                        s.current_interval_seconds
+                    )
+                    .yellow()
+                    .bold()
+                );
+            }
+            MonitorMode::Repeated { max_unlocks, ref tts_api_key, ref tts_voice } => {
+                // 重复锁屏模式：简单计数
+                let (count, reached_max) = {
+                    let mut s = info.state.lock().unwrap();
+                    s.record_unlock_simple()
+                };
+
+                if let Some(max) = max_unlocks {
+                    let remaining = max.saturating_sub(count);
+
+                    if reached_max {
+                        println!(
+                            "{}",
+                            format!(
+                                "⚠️ [{}] Maximum unlock count ({}) reached! Shutdown will be triggered on next lock screen.",
+                                task_name, max
+                            )
+                            .red()
+                            .bold()
+                        );
+                        // 播放最终警告
+                        Self::play_warning_tts(
+                            tts_api_key.as_deref(),
+                            tts_voice.as_deref(),
+                            "已达到最大解锁次数，下次锁屏将触发关机",
+                        );
+                    } else if remaining == 1 {
+                        println!(
+                            "{}",
+                            format!(
+                                "⚠️ [{}] Unlock count: {}/{}. This is your LAST unlock!",
+                                task_name, count, max
+                            )
+                            .yellow()
+                            .bold()
+                        );
+                        // 播放警告
+                        Self::play_warning_tts(
+                            tts_api_key.as_deref(),
+                            tts_voice.as_deref(),
+                            &format!("这是第{}次解锁，再解锁1次将触发关机", count),
+                        );
+                    } else {
+                        println!(
+                            "{}",
+                            format!(
+                                "🔓 [{}] Unlock count: {}/{}, {} remaining",
+                                task_name, count, max, remaining
+                            )
+                            .yellow()
+                            .bold()
+                        );
+                    }
+                } else {
+                    println!(
+                        "{}",
+                        format!("🔓 [{}] Unlock count: {}", task_name, count)
+                            .yellow()
+                            .bold()
+                    );
+                }
+            }
+        }
+    }
+
     /// 非 Windows 平台的监控循环（占位符）
     #[cfg(not(target_os = "windows"))]
-    fn monitor_loop(
-        _state: Arc<Mutex<LockscreenState>>,
-        _min_interval_seconds: u32,
-        _is_running: Arc<Mutex<bool>>,
-    ) {
+    fn monitor_loop() {
         println!("{}", "⚠ Lockscreen monitoring is only supported on Windows".yellow().bold());
     }
 
-    /// 停止监控
-    #[allow(dead_code)]
-    pub fn stop(&self) {
-        let mut running = self.is_running.lock().unwrap();
-        *running = false;
+    /// 播放警告语音
+    fn play_warning_tts(api_key: Option<&str>, voice: Option<&str>, text: &str) {
+        if let (Some(key), Some(v)) = (api_key, voice) {
+            let client = VolcengineTtsClient::new(key.to_string());
+            if let Err(e) = client.synthesize_and_play(text, v) {
+                println!(
+                    "{}",
+                    format!("⚠ Failed to play warning TTS: {}", e).yellow()
+                );
+            }
+        } else {
+            println!(
+                "{}",
+                "⚠ TTS warning skipped (no API key or voice configured)".yellow()
+            );
+        }
     }
+
 }
 
 // 全局状态存储（用于在 window_proc 中访问）
-#[cfg(target_os = "windows")]
 lazy_static::lazy_static! {
-    static ref MONITOR_STATE: Mutex<Option<(Arc<Mutex<LockscreenState>>, u32)>> = Mutex::new(None);
+    /// 所有注册任务的监控信息
+    static ref MONITOR_TASKS: Mutex<HashMap<String, TaskMonitorInfo>> = Mutex::new(HashMap::new());
+    /// 监控器是否已启动
+    static ref MONITOR_STARTED: Mutex<bool> = Mutex::new(false);
 }

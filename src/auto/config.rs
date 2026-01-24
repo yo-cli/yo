@@ -53,6 +53,12 @@ pub struct Task {
     /// 自适应锁屏：最小间隔秒数（默认10秒）
     #[serde(default = "default_min_interval_seconds")]
     pub min_interval_seconds: u32,
+    /// 最大解锁次数（超过后触发关机，仅 lockscreen_repeated 有效）
+    #[serde(default)]
+    pub max_unlocks: Option<u32>,
+    /// 超过最大解锁次数后是否关机
+    #[serde(default)]
+    pub shutdown_on_exceed: bool,
 }
 
 fn default_min_interval_seconds() -> u32 {
@@ -84,6 +90,8 @@ impl Default for AutoConfig {
                 tts_voice: None,
                 tts_api_key: None,
                 min_interval_seconds: 10,
+                max_unlocks: None,
+                shutdown_on_exceed: false,
             }],
         }
     }

@@ -19,17 +19,20 @@ fn show_version() {
 fn show_usage() {
     println!("Usage: {} [OPTION] | run [COMMAND] | init @username/repo", PROGRAM_NAME);
     println!("Options:");
-    println!("  -v, --version          Show version information");
-    println!("  run auto               Start task scheduler (runs continuously)");
-    println!("  run auto --web         Start task scheduler with Web UI (default port: 9999)");
-    println!("  run auto --web [port]  Start task scheduler with Web UI on custom port");
-    println!("  run clone              Clone template with keyword replacement");
-    println!("  run s5                 Start SOCKS5 proxy (automatic mode)");
-    println!("  run s5 -i              Start SOCKS5 proxy (interactive mode)");
-    println!("  run s5 --interactive   Start SOCKS5 proxy (interactive mode)");
-    println!("  run test               Test hourly chime playback");
-    println!("  run ve                 Test Volcengine TTS synthesis and playback");
-    println!("  init @username/repo    Initialize GitHub SSH keys for repository");
+    println!("  -v, --version                    Show version information");
+    println!("  run auto                         Start task scheduler (runs continuously)");
+    println!("  run auto --web                   Start task scheduler with Web UI (default port: 9999)");
+    println!("  run auto --web [port]            Start task scheduler with Web UI on custom port");
+    println!("  run auto --web --autostart         Install autostart and start Web UI (Windows only)");
+    println!("  run auto --web --autostart remove  Remove autostart (Windows only)");
+    println!("  run auto --web --autostart status  Show autostart status (Windows only)");
+    println!("  run clone                        Clone template with keyword replacement");
+    println!("  run s5                           Start SOCKS5 proxy (automatic mode)");
+    println!("  run s5 -i                        Start SOCKS5 proxy (interactive mode)");
+    println!("  run s5 --interactive             Start SOCKS5 proxy (interactive mode)");
+    println!("  run test                         Test hourly chime playback");
+    println!("  run ve                           Test Volcengine TTS synthesis and playback");
+    println!("  init @username/repo              Initialize GitHub SSH keys for repository");
 }
 
 fn main() {
@@ -54,20 +57,94 @@ fn main() {
 
     // 处理 run auto 命令
     if args.len() >= 3 && arg1 == "run" && args[2] == "auto" {
-        // 检查是否有 --web 参数
+        // 解析参数
         let mut web_enabled = false;
         let mut web_port = 9999u16;
+        let mut autostart_action: Option<String> = None; // None, Some("install"), Some("remove"), Some("status")
 
-        if args.len() >= 4 && args[3] == "--web" {
-            web_enabled = true;
-            // 检查是否指定了端口
-            if args.len() >= 5 {
-                if let Ok(port) = args[4].parse::<u16>() {
-                    web_port = port;
-                } else {
-                    println!("{}", format!("✗ Invalid port number: {}", args[4]).red().bold());
+        let mut i = 3;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--web" => {
+                    web_enabled = true;
+                    // 检查下一个参数是否是端口号
+                    if i + 1 < args.len() {
+                        if let Ok(port) = args[i + 1].parse::<u16>() {
+                            web_port = port;
+                            i += 1;
+                        }
+                    }
+                }
+                "--autostart" => {
+                    // 检查下一个参数是否是 remove 或 status
+                    if i + 1 < args.len() {
+                        match args[i + 1].as_str() {
+                            "remove" => {
+                                autostart_action = Some("remove".to_string());
+                                i += 1;
+                            }
+                            "status" => {
+                                autostart_action = Some("status".to_string());
+                                i += 1;
+                            }
+                            _ => {
+                                // 默认是 install
+                                autostart_action = Some("install".to_string());
+                            }
+                        }
+                    } else {
+                        autostart_action = Some("install".to_string());
+                    }
+                }
+                _ => {
+                    println!("{}", format!("✗ Unknown option: {}", args[i]).red().bold());
+                    show_usage();
                     std::process::exit(1);
                 }
+            }
+            i += 1;
+        }
+
+        // 处理 autostart 相关操作
+        if let Some(action) = autostart_action {
+            if !web_enabled {
+                println!("{}", "✗ --autostart requires --web option".red().bold());
+                std::process::exit(1);
+            }
+
+            match action.as_str() {
+                "remove" => {
+                    match AutoCommand::autostart_remove() {
+                        Ok(_) => {}
+                        Err(e) => {
+                            println!("{}", format!("✗ {}", e).red().bold());
+                            std::process::exit(1);
+                        }
+                    }
+                    return;
+                }
+                "status" => {
+                    match AutoCommand::autostart_status() {
+                        Ok(_) => {}
+                        Err(e) => {
+                            println!("{}", format!("✗ {}", e).red().bold());
+                            std::process::exit(1);
+                        }
+                    }
+                    return;
+                }
+                "install" => {
+                    // 先安装 autostart，然后继续启动
+                    match AutoCommand::autostart_install(web_port) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            println!("{}", format!("✗ {}", e).red().bold());
+                            std::process::exit(1);
+                        }
+                    }
+                    // 安装后继续启动 Web UI
+                }
+                _ => {}
             }
         }
 

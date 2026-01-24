@@ -1,4 +1,6 @@
+pub mod autostart;
 pub mod config;
+pub mod instance_lock;
 pub mod lockscreen_monitor;
 pub mod lockscreen_state;
 pub mod scheduler;
