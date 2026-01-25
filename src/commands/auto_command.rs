@@ -136,6 +136,12 @@ impl AutoCommand {
         println!("{}", "💡 Press Ctrl+C to stop".yellow());
         println!();
 
+        // 启动时调用所有规则的 on_mount
+        {
+            let s = scheduler.lock().unwrap();
+            s.call_on_mount_all();
+        }
+
         loop {
             // 只在执行时获取锁，执行完立即释放
             {

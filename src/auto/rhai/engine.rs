@@ -1,10 +1,11 @@
 //! Rhai 脚本引擎
 
 use super::{api, default_rules};
-use super::types::{GlobalState, Rule, Trigger};
+use super::types::{CurrentScript, GlobalState, Rule, Trigger};
 use crate::auto::config::{keys, GlobalConfig};
 use colored::Colorize;
 use rhai::{Dynamic, Engine, Map, Scope};
+use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -125,20 +126,223 @@ impl RhaiEngine {
     }
 
     pub fn call_on_tick(&self, rule: &Rule) -> Result<(), String> {
-        self.call_fn(rule, "on_tick")
+        self.call_fn_with_state(rule, "on_tick")
     }
 
     pub fn call_on_unlock(&self, rule: &Rule) -> Result<(), String> {
-        self.call_fn(rule, "on_unlock")
+        self.call_fn_with_state(rule, "on_unlock")
     }
 
     pub fn call_on_lock(&self, rule: &Rule) -> Result<(), String> {
-        self.call_fn(rule, "on_lock")
+        self.call_fn_with_state(rule, "on_lock")
     }
 
-    fn call_fn(&self, rule: &Rule, fn_name: &str) -> Result<(), String> {
+    pub fn call_on_mount(&self, rule: &Rule) -> Result<(), String> {
+        self.call_fn_with_state(rule, "on_mount")
+    }
+
+    pub fn call_on_destroy(&self, rule: &Rule) -> Result<(), String> {
+        self.call_fn_with_state(rule, "on_destroy")
+    }
+
+    /// 调用函数，支持状态持久化
+    fn call_fn_with_state(&self, rule: &Rule, fn_name: &str) -> Result<(), String> {
+        // 设置当前脚本上下文（用于 generate_script_events）
+        {
+            let mut gs = self.state.lock().unwrap();
+            gs.current_script = Some(CurrentScript {
+                name: rule.name.clone(),
+                time_range: rule.trigger.time_range.clone(),
+                interval_minutes: rule.trigger.interval_minutes.unwrap_or(1),
+                ast: rule.ast.clone(),
+            });
+        }
+
         let mut scope = Scope::new();
+
+        // 运行脚本获取默认 state 和其他变量
         self.engine.run_ast_with_scope(&mut scope, &rule.ast).map_err(|e| e.to_string())?;
-        self.engine.call_fn::<()>(&mut scope, &rule.ast, fn_name, ()).map_err(|e| e.to_string())
+
+        // 获取脚本定义的默认 state
+        let default_state = scope.get_value::<Dynamic>("state")
+            .and_then(|v| v.try_cast::<Map>());
+
+        // 从 GlobalState 加载已保存的 state
+        let saved_state = {
+            let gs = self.state.lock().unwrap();
+            gs.script_states.get(&rule.name).cloned()
+        };
+
+        // 合并状态：已保存的值覆盖默认值
+        if let Some(default) = default_state {
+            let final_state = if let Some(saved) = saved_state {
+                let mut merged = default.clone();
+                for (k, v) in saved {
+                    merged.insert(k, v);
+                }
+                merged
+            } else {
+                // 首次运行，尝试从磁盘加载
+                if let Some(disk_state) = self.load_state_from_disk(&rule.name) {
+                    let mut merged = default.clone();
+                    for (k, v) in disk_state {
+                        merged.insert(k, v);
+                    }
+                    merged
+                } else {
+                    default
+                }
+            };
+
+            // 更新 scope 中的 state
+            scope.set_value("state", final_state);
+        }
+
+        // 调用函数（如果存在）
+        let result = self.engine.call_fn::<()>(&mut scope, &rule.ast, fn_name, ());
+
+        // 忽略函数不存在的错误
+        if let Err(ref e) = result {
+            let err_str = e.to_string();
+            if err_str.contains("Function not found") || err_str.contains("not found") {
+                // 函数不存在，静默忽略
+            } else {
+                return Err(err_str);
+            }
+        }
+
+        // 保存状态
+        if let Some(state_val) = scope.get_value::<Dynamic>("state") {
+            if let Some(state_map) = state_val.try_cast::<Map>() {
+                // 保存到 GlobalState
+                {
+                    let mut gs = self.state.lock().unwrap();
+                    gs.script_states.insert(rule.name.clone(), state_map.clone());
+                }
+                // 持久化到磁盘
+                self.save_state_to_disk(&rule.name, &state_map);
+            }
+        }
+
+        // 清除当前脚本上下文
+        {
+            let mut gs = self.state.lock().unwrap();
+            gs.current_script = None;
+        }
+
+        Ok(())
+    }
+
+    /// 获取状态存储目录
+    fn get_state_dir() -> PathBuf {
+        let home = std::env::var("USERPROFILE")
+            .or_else(|_| std::env::var("HOME"))
+            .unwrap_or_else(|_| ".".to_string());
+        PathBuf::from(home).join(".yo").join("state")
+    }
+
+    /// 从磁盘加载脚本状态
+    fn load_state_from_disk(&self, script_name: &str) -> Option<Map> {
+        let state_dir = Self::get_state_dir();
+        let path = state_dir.join(format!("{}.json", script_name));
+
+        if !path.exists() {
+            return None;
+        }
+
+        let content = fs::read_to_string(&path).ok()?;
+        let json: JsonMap<String, JsonValue> = serde_json::from_str(&content).ok()?;
+
+        Some(Self::json_to_rhai_map(&json))
+    }
+
+    /// 保存脚本状态到磁盘
+    fn save_state_to_disk(&self, script_name: &str, state: &Map) {
+        let state_dir = Self::get_state_dir();
+        if !state_dir.exists() {
+            let _ = fs::create_dir_all(&state_dir);
+        }
+
+        let path = state_dir.join(format!("{}.json", script_name));
+        let json = Self::rhai_map_to_json(state);
+
+        if let Ok(content) = serde_json::to_string_pretty(&json) {
+            let _ = fs::write(&path, content);
+        }
+    }
+
+    /// JSON Map 转 Rhai Map
+    fn json_to_rhai_map(json: &JsonMap<String, JsonValue>) -> Map {
+        let mut map = Map::new();
+        for (k, v) in json {
+            let dynamic = Self::json_to_dynamic(v);
+            map.insert(k.clone().into(), dynamic);
+        }
+        map
+    }
+
+    /// JSON Value 转 Rhai Dynamic
+    fn json_to_dynamic(value: &JsonValue) -> Dynamic {
+        match value {
+            JsonValue::Null => Dynamic::UNIT,
+            JsonValue::Bool(b) => Dynamic::from(*b),
+            JsonValue::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    Dynamic::from(i)
+                } else if let Some(f) = n.as_f64() {
+                    Dynamic::from(f)
+                } else {
+                    Dynamic::UNIT
+                }
+            }
+            JsonValue::String(s) => Dynamic::from(s.clone()),
+            JsonValue::Array(arr) => {
+                let vec: Vec<Dynamic> = arr.iter().map(Self::json_to_dynamic).collect();
+                Dynamic::from(vec)
+            }
+            JsonValue::Object(obj) => {
+                let map = Self::json_to_rhai_map(obj);
+                Dynamic::from(map)
+            }
+        }
+    }
+
+    /// Rhai Map 转 JSON Map
+    fn rhai_map_to_json(map: &Map) -> JsonMap<String, JsonValue> {
+        let mut json = JsonMap::new();
+        for (k, v) in map {
+            let value = Self::dynamic_to_json(v);
+            json.insert(k.to_string(), value);
+        }
+        json
+    }
+
+    /// Rhai Dynamic 转 JSON Value
+    fn dynamic_to_json(value: &Dynamic) -> JsonValue {
+        if value.is_unit() {
+            JsonValue::Null
+        } else if let Some(b) = value.as_bool().ok() {
+            JsonValue::Bool(b)
+        } else if let Some(i) = value.as_int().ok() {
+            JsonValue::Number(i.into())
+        } else if let Some(f) = value.as_float().ok() {
+            serde_json::Number::from_f64(f)
+                .map(JsonValue::Number)
+                .unwrap_or(JsonValue::Null)
+        } else if let Some(s) = value.clone().into_string().ok() {
+            JsonValue::String(s)
+        } else if let Some(arr) = value.clone().into_array().ok() {
+            let vec: Vec<JsonValue> = arr.iter().map(Self::dynamic_to_json).collect();
+            JsonValue::Array(vec)
+        } else if let Some(map) = value.clone().try_cast::<Map>() {
+            JsonValue::Object(Self::rhai_map_to_json(&map))
+        } else {
+            JsonValue::Null
+        }
+    }
+
+    /// 获取全局状态的引用
+    pub fn get_state(&self) -> Arc<Mutex<GlobalState>> {
+        self.state.clone()
     }
 }

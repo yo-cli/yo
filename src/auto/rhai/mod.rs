@@ -1,6 +1,6 @@
 //! Rhai 脚本引擎模块
 
-mod api;
+pub mod api;
 mod default_rules;
 mod index;
 

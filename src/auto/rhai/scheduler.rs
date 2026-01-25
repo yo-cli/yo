@@ -27,7 +27,68 @@ impl RhaiScheduler {
         println!("{}", format!("📊 Index: {} tick, {} unlock, {} lock",
             tick_count, index.unlock_rules.len(), index.lock_rules.len()).blue());
 
+        // 初始化每个规则的时间范围状态
+        {
+            let state = engine.get_state();
+            let mut gs = state.lock().unwrap();
+            for rule in &rules {
+                let in_range = Self::check_in_time_range(rule);
+                gs.script_in_range.insert(rule.name.clone(), in_range);
+            }
+        }
+
         Ok(Self { engine, rules, index, last_tick_minute: None })
+    }
+
+    /// 启动时调用所有规则的 on_mount
+    pub fn call_on_mount_all(&self) {
+        println!("{}", "🚀 Calling on_mount for all rules...".cyan());
+        for rule in &self.rules {
+            if let Err(e) = self.engine.call_on_mount(rule) {
+                if !e.contains("not found") {
+                    println!("{}", format!("  ⚠ [{}] on_mount error: {}", rule.name, e).yellow());
+                }
+            }
+        }
+    }
+
+    /// 检查规则是否在时间范围内
+    fn check_in_time_range(rule: &Rule) -> bool {
+        if let Some((ref start, ref end)) = rule.trigger.time_range {
+            Self::in_time_range(start, end)
+        } else {
+            true // 无时间范围限制，始终在范围内
+        }
+    }
+
+    /// 检查时间范围转换，调用 on_destroy
+    fn check_time_range_transitions(&self) {
+        let state = self.engine.get_state();
+
+        for rule in &self.rules {
+            let currently_in_range = Self::check_in_time_range(rule);
+
+            let was_in_range = {
+                let gs = state.lock().unwrap();
+                gs.script_in_range.get(&rule.name).copied().unwrap_or(false)
+            };
+
+            // 从范围内 -> 范围外，调用 on_destroy
+            if was_in_range && !currently_in_range {
+                println!("{}", format!("🔚 [{}] Leaving time range, calling on_destroy", rule.name).yellow());
+                if let Err(e) = self.engine.call_on_destroy(rule) {
+                    if !e.contains("not found") {
+                        println!("{}", format!("  ⚠ on_destroy error: {}", e).yellow());
+                    }
+                }
+            }
+
+            // 更新状态
+            {
+                let mut gs = state.lock().unwrap();
+                gs.script_in_range.insert(rule.name.clone(), currently_in_range);
+            }
+        }
     }
 
     pub fn reload(&mut self) -> Result<(), String> {
@@ -47,12 +108,20 @@ impl RhaiScheduler {
         &self.rules
     }
 
+    /// 获取全局状态
+    pub fn get_state(&self) -> Arc<Mutex<super::types::GlobalState>> {
+        self.engine.get_state()
+    }
+
     pub fn on_tick(&mut self) {
         let now = Local::now();
         let (hour, minute) = (now.hour(), now.minute());
 
         if self.last_tick_minute == Some(minute) { return; }
         self.last_tick_minute = Some(minute);
+
+        // 检查时间范围转换
+        self.check_time_range_transitions();
 
         let indices = match self.index.tick_rules.get(&hour) {
             Some(i) => i.clone(),
@@ -156,6 +225,9 @@ impl RhaiScheduler {
         println!("{}", format!("🚀 Started at {}", Local::now().format("%Y-%m-%d %H:%M:%S")).green().bold());
         println!("{}", "💡 Press Ctrl+C to stop".yellow());
         println!();
+
+        // 启动时调用所有规则的 on_mount
+        self.call_on_mount_all();
 
         loop {
             self.on_tick();

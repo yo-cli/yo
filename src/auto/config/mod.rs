@@ -73,11 +73,6 @@ impl GlobalConfig {
     pub fn remove(&mut self, key: &str) -> Option<String> {
         self.env.remove(key)
     }
-
-    /// 获取所有环境变量
-    pub fn get_all(&self) -> &HashMap<String, String> {
-        &self.env
-    }
 }
 
 /// 预定义的配置键
