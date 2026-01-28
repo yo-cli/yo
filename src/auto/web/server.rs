@@ -36,6 +36,8 @@ pub struct RuleInfo {
 pub struct StatusResponse {
     pub current_time: String,
     pub rules_count: usize,
+    pub paused: bool,
+    pub pause_remaining: Option<i64>,
 }
 
 /// 规则列表响应
@@ -136,6 +138,12 @@ pub struct RenameScriptRequest {
     pub new_name: String,
 }
 
+/// 暂停请求
+#[derive(Debug, Deserialize)]
+pub struct PauseRequest {
+    pub minutes: u32,
+}
+
 /// 日历事件（独立存储，与脚本分离）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CalendarEvent {
@@ -211,6 +219,8 @@ pub async fn run_web_server(state: Arc<WebState>, port: u16) {
         .route("/api/script/{name}/simulate", axum::routing::post(simulate_script_handler))
         .route("/api/config", get(get_config))
         .route("/api/config/env", axum::routing::post(set_env).delete(delete_env))
+        .route("/api/pause", axum::routing::post(pause_scheduler))
+        .route("/api/resume", axum::routing::post(resume_scheduler))
         .with_state(state);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
@@ -237,10 +247,14 @@ async fn serve_vue() -> impl IntoResponse {
 async fn get_status(State(state): State<Arc<WebState>>) -> Json<StatusResponse> {
     let scheduler = state.scheduler.lock().unwrap();
     let rules_count = scheduler.rules_count();
+    let pause_remaining = scheduler.pause_remaining_secs();
+    let paused = pause_remaining.map(|s| s > 0).unwrap_or(false);
 
     Json(StatusResponse {
         current_time: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
         rules_count,
+        paused,
+        pause_remaining,
     })
 }
 
@@ -520,10 +534,39 @@ async fn reload_rules(State(state): State<Arc<WebState>>) -> Json<StatusResponse
     let mut scheduler = state.scheduler.lock().unwrap();
     let _ = scheduler.reload();
     let rules_count = scheduler.rules_count();
+    let pause_remaining = scheduler.pause_remaining_secs();
+    let paused = pause_remaining.map(|s| s > 0).unwrap_or(false);
 
     Json(StatusResponse {
         current_time: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
         rules_count,
+        paused,
+        pause_remaining,
+    })
+}
+
+/// 暂停调度器
+async fn pause_scheduler(
+    State(state): State<Arc<WebState>>,
+    Json(payload): Json<PauseRequest>,
+) -> Json<ResultResponse> {
+    let mut scheduler = state.scheduler.lock().unwrap();
+    scheduler.pause(payload.minutes);
+    Json(ResultResponse {
+        success: true,
+        message: format!("Paused for {} minutes", payload.minutes),
+    })
+}
+
+/// 恢复调度器
+async fn resume_scheduler(
+    State(state): State<Arc<WebState>>,
+) -> Json<ResultResponse> {
+    let mut scheduler = state.scheduler.lock().unwrap();
+    scheduler.resume();
+    Json(ResultResponse {
+        success: true,
+        message: "Resumed".to_string(),
     })
 }
 

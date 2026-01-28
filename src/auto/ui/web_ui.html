@@ -987,6 +987,61 @@
             min-width: 200px;
             text-align: center;
         }
+        /* Pause bar */
+        .pause-bar {
+            background: linear-gradient(135deg, #ff9800, #f57c00);
+            color: white;
+            padding: 12px 24px;
+            border-radius: 10px;
+            margin-bottom: 16px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 2px 8px rgba(255, 152, 0, 0.3);
+            animation: slideIn 0.3s ease;
+        }
+        .pause-bar-info {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-weight: 500;
+        }
+        .pause-countdown {
+            font-size: 20px;
+            font-weight: 700;
+            font-variant-numeric: tabular-nums;
+        }
+        .btn-resume {
+            background: rgba(255,255,255,0.2);
+            color: white;
+            border: 1px solid rgba(255,255,255,0.4);
+            padding: 8px 20px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            transition: background 0.2s;
+        }
+        .btn-resume:hover {
+            background: rgba(255,255,255,0.35);
+        }
+        .pause-buttons {
+            display: flex;
+            gap: 8px;
+        }
+        .btn-pause {
+            background: rgba(255,255,255,0.15);
+            color: white;
+            border: 1px solid rgba(255,255,255,0.3);
+            padding: 6px 14px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 13px;
+            transition: all 0.2s;
+        }
+        .btn-pause:hover {
+            background: rgba(255,255,255,0.3);
+        }
     </style>
 </head>
 <body>
@@ -996,6 +1051,15 @@
                 <div>
                     <h1>Yo Rhai Scheduler</h1>
                     <p>{{ status.current_time }}</p>
+                </div>
+                <div style="display:flex; align-items:center; gap:16px;">
+                    <div class="pause-buttons" v-if="!status.paused">
+                        <button class="btn-pause" @click="pauseScheduler(10)">⏸ 10m</button>
+                        <button class="btn-pause" @click="pauseScheduler(20)">20m</button>
+                        <button class="btn-pause" @click="pauseScheduler(30)">30m</button>
+                        <button class="btn-pause" @click="pauseScheduler(60)">60m</button>
+                    </div>
+                    <button class="btn-resume" v-if="status.paused" @click="resumeScheduler()">▶ Resume</button>
                 </div>
                 <div class="tabs">
                     <button class="tab" :class="{ active: tab === 'calendar' }" @click="tab = 'calendar'; loadSchedule()">
@@ -1014,6 +1078,15 @@
                         Settings
                     </button>
                 </div>
+            </div>
+
+            <!-- Pause Bar -->
+            <div class="pause-bar" v-if="status.paused">
+                <div class="pause-bar-info">
+                    <span>⏸ Paused</span>
+                    <span class="pause-countdown">{{ formatPauseRemaining(status.pause_remaining) }}</span>
+                </div>
+                <button class="btn-resume" @click="resumeScheduler()">▶ Resume</button>
             </div>
 
             <!-- Calendar Tab -->
@@ -1615,6 +1688,43 @@ if has_env("TTS_API_KEY") {
                     } catch (e) {
                         console.error('Failed to fetch status:', e);
                     }
+                };
+
+                const pauseScheduler = async (minutes) => {
+                    try {
+                        const res = await fetch('/api/pause', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ minutes })
+                        });
+                        const data = await res.json();
+                        if (data.success) {
+                            showToast(`Paused for ${minutes} minutes`);
+                            await fetchStatus();
+                        }
+                    } catch (e) {
+                        showToast('Failed to pause', 'error');
+                    }
+                };
+
+                const resumeScheduler = async () => {
+                    try {
+                        const res = await fetch('/api/resume', { method: 'POST' });
+                        const data = await res.json();
+                        if (data.success) {
+                            showToast('Resumed');
+                            await fetchStatus();
+                        }
+                    } catch (e) {
+                        showToast('Failed to resume', 'error');
+                    }
+                };
+
+                const formatPauseRemaining = (seconds) => {
+                    if (!seconds || seconds <= 0) return '0:00';
+                    const m = Math.floor(seconds / 60);
+                    const s = seconds % 60;
+                    return `${m}:${String(s).padStart(2, '0')}`;
                 };
 
                 const fetchRules = async () => {
@@ -2673,6 +2783,9 @@ fn on_tick() {
                     deleteEventModal,
                     colors,
                     // Methods
+                    pauseScheduler,
+                    resumeScheduler,
+                    formatPauseRemaining,
                     reload,
                     loadState,
                     loadScripts,

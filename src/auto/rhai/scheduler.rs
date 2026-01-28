@@ -3,7 +3,7 @@
 use super::engine::RhaiEngine;
 use super::index::TimeIndex;
 use super::types::{Rule, Trigger};
-use chrono::{Datelike, Local, NaiveTime, Timelike};
+use chrono::{DateTime, Datelike, Local, NaiveTime, Timelike};
 use colored::Colorize;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -14,6 +14,7 @@ pub struct RhaiScheduler {
     rules: Vec<Rule>,
     index: TimeIndex,
     last_tick_minute: Option<u32>,
+    paused_until: Option<DateTime<Local>>,
 }
 
 impl RhaiScheduler {
@@ -37,7 +38,7 @@ impl RhaiScheduler {
             }
         }
 
-        Ok(Self { engine, rules, index, last_tick_minute: None })
+        Ok(Self { engine, rules, index, last_tick_minute: None, paused_until: None })
     }
 
     /// 启动时调用所有规则的 on_mount
@@ -113,7 +114,47 @@ impl RhaiScheduler {
         self.engine.get_state()
     }
 
+    /// 暂停所有规则指定分钟数
+    pub fn pause(&mut self, minutes: u32) {
+        let until = Local::now() + chrono::Duration::minutes(minutes as i64);
+        println!("{}", format!("⏸ Scheduler paused for {} minutes (until {})", minutes, until.format("%H:%M:%S")).yellow().bold());
+        self.paused_until = Some(until);
+    }
+
+    /// 取消暂停
+    pub fn resume(&mut self) {
+        if self.paused_until.is_some() {
+            println!("{}", "▶ Scheduler resumed".green().bold());
+            self.paused_until = None;
+        }
+    }
+
+    /// 是否处于暂停状态
+    pub fn is_paused(&mut self) -> bool {
+        if let Some(until) = self.paused_until {
+            if Local::now() >= until {
+                println!("{}", "▶ Pause expired, scheduler resumed".green().bold());
+                self.paused_until = None;
+                false
+            } else {
+                true
+            }
+        } else {
+            false
+        }
+    }
+
+    /// 暂停剩余秒数，None 表示未暂停
+    pub fn pause_remaining_secs(&self) -> Option<i64> {
+        self.paused_until.map(|until| {
+            let remaining = (until - Local::now()).num_seconds();
+            if remaining > 0 { remaining } else { 0 }
+        })
+    }
+
     pub fn on_tick(&mut self) {
+        if self.is_paused() { return; }
+
         let now = Local::now();
         let (hour, minute) = (now.hour(), now.minute());
 
@@ -187,7 +228,8 @@ impl RhaiScheduler {
         now.minute()
     }
 
-    pub fn on_unlock(&self) {
+    pub fn on_unlock(&mut self) {
+        if self.is_paused() { return; }
         for idx in &self.index.unlock_rules {
             if let Some(rule) = self.rules.get(*idx) {
                 if !self.should_execute_event(rule) { continue; }
@@ -199,7 +241,8 @@ impl RhaiScheduler {
         }
     }
 
-    pub fn on_lock(&self) {
+    pub fn on_lock(&mut self) {
+        if self.is_paused() { return; }
         for idx in &self.index.lock_rules {
             if let Some(rule) = self.rules.get(*idx) {
                 if let Err(e) = self.engine.call_on_lock(rule) {

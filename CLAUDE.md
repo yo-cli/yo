@@ -43,10 +43,7 @@ cargo fmt
 # Check without building
 cargo check
 
-# Generate and open documentation
-cargo doc --open
-
-# Debug build and run (useful for development)
+# Debug build and run
 cargo run -- --version
 cargo run -- run auto
 ```
@@ -57,173 +54,128 @@ cargo run -- run auto
 # GitHub SSH key setup
 yo init @username/repository
 
-# SOCKS5 proxy (automatic mode)
+# SOCKS5 proxy (automatic / interactive mode)
 yo run s5
-
-# SOCKS5 proxy (interactive mode)
 yo run s5 -i
 
-# Task scheduler (runs as persistent service)
+# Task scheduler (persistent service)
 yo run auto
 
-# Task scheduler with Web UI (default port 9999)
+# Task scheduler with Web UI (default port 9999 / custom port)
 yo run auto --web
-
-# Task scheduler with Web UI on custom port
 yo run auto --web 8080
 
-# Windows autostart management (adds VBS script to Startup folder)
-yo run auto --web --autostart           # Install autostart and start Web UI
+# Windows autostart management
+yo run auto --web --autostart           # Install autostart
 yo run auto --web --autostart remove    # Remove autostart
-yo run auto --web --autostart status    # Show autostart status
+yo run auto --web --autostart status    # Show status
 
 # Template cloning with keyword replacement
 yo run clone
 
-# Test hourly chime playback
+# Test hourly chime / Volcengine TTS
 yo run test
-
-# Test Volcengine TTS synthesis and playback
 yo run ve
-
-# Version info
-yo --version
 ```
 
 ## Architecture
 
 ### Module Structure
 
-The codebase follows a domain-driven structure with 5 main modules:
+The codebase follows a domain-driven structure with 5 main modules under `src/`:
 
-1. **`commands/`** - Command entry points that orchestrate business logic
-   - `github_init.rs` - SSH key generation and GitHub API interaction
-   - `s5_command.rs` - SOCKS5 proxy setup orchestration
-   - `auto_command.rs` - Task scheduler entry point
-   - `clone_command.rs` - Template cloning workflow
-   - `test_command.rs` - Hourly chime playback test
-   - `ve_command.rs` - Volcengine TTS test
-
-2. **`github/`** - GitHub integration layer
-   - `token_manager.rs` - Encrypted storage/retrieval of GitHub tokens
-   - `ssh_key_manager.rs` - Ed25519 key generation and SSH config management
-   - `api_client.rs` - GitHub REST API client (deploy keys, etc.)
-
-3. **`s5/`** - SOCKS5 proxy management
-   - `docker_manager.rs` - Docker installation detection and container management
-   - `proxy_manager.rs` - GOST proxy configuration and lifecycle
-   - `network_utils.rs` - Port availability checking and network testing
-
-4. **`auto/`** - Task scheduler subsystem (Rhai-based)
-   - `rhai/` - Rhai scripting engine
-     - `engine.rs` - Rhai engine initialization, API registration, script loading
-     - `scheduler.rs` - Main scheduler with 30s polling loop
-     - `api.rs` - Exposed Rhai APIs (speak, lock_screen, shutdown, etc.)
-     - `types.rs` - Rule, Trigger, GlobalState definitions
-     - `default_rules.rs` - Default script templates
-   - `screen/` - Lockscreen monitoring
-     - `monitor.rs` - Windows session state tracking via WTS APIs
-   - `startup/` - Windows autostart management
-     - `manager.rs` - VBS script creation in Startup folder
-   - `tts/` - Text-to-speech
-     - `client.rs` - Volcengine TTS API client
-     - `player.rs` - Audio playback via rodio
-   - `state/` - State management
-     - `instance_lock.rs` - Single instance enforcement via PID file
-   - `web/` - Web UI server
-     - `server.rs` - Axum-based REST API and static file serving
-     - `types.rs` - WebState definition
-   - `ui/` - Web UI frontend
-     - `web_ui.html` - Vue 3 Composition API frontend with script editor
-
-5. **`common/`** - Shared utilities
-   - `crypto_utils.rs` - AES-256-CBC encryption using machine-specific MAC address as key derivation input
+1. **`commands/`** - Command entry points that orchestrate business logic (one file per command)
+2. **`github/`** - GitHub integration: encrypted token storage, Ed25519 key generation, REST API client
+3. **`s5/`** - SOCKS5 proxy: Docker management, GOST proxy lifecycle, network utilities
+4. **`auto/`** - Task scheduler subsystem (largest module), containing:
+   - `rhai/` - Scripting engine, scheduler loop, API registration, rule types, time indexing
+   - `config/` - GlobalConfig for environment variable management (`~/.yo/config.json`)
+   - `screen/` - Lockscreen monitoring (Windows WTS APIs, cross-platform stubs)
+   - `startup/` - Windows autostart via VBS script in Startup folder
+   - `tts/` - Volcengine TTS client and rodio audio playback
+   - `state/` - Single instance enforcement via PID file
+   - `web/` - Axum-based REST API + static file serving for Web UI
+   - `ui/` - Vue 3 Composition API frontend (`web_ui.html`)
+5. **`common/`** - Shared utilities (AES-256-CBC encryption with MAC-address-derived key)
 
 ### Key Design Patterns
 
+**CLI Dispatch**: Manual argument parsing in `main.rs` (no clap/structopt). Pattern matching on positional args dispatches to command structs. All commands return `Result` with errors displayed in bold red.
+
 **Encryption Strategy**:
-- GitHub tokens are encrypted using AES-256-CBC
+- GitHub tokens encrypted with AES-256-CBC
 - Key derivation: SHA-256(MAC_address + SALT)
 - Stored in `~/.yo/github_token.enc`
 
 **Rhai Scripting Engine**:
-- Scripts are stored in `~/.yo/rules/*.rhai`
-- Each script defines a `trigger` configuration and event handlers
+- Scripts stored in `~/.yo/rules/*.rhai`
+- Each script defines a `trigger` map and event handler functions
 - Trigger options: `time_range`, `interval_minutes`, `events`, `weekdays`, `enabled`
+- Script lifecycle functions: `on_mount()`, `on_tick()`, `on_lock()`, `on_unlock()`, `on_destroy()`
 - Event types: `tick` (30s interval), `lock`, `unlock`
-- Available APIs:
-  - `speak(text)` - TTS playback
-  - `lock_screen()` - Lock workstation
-  - `shutdown(delay_secs)` - Delayed shutdown
-  - `chime(hour)` - Hourly chime playback
-  - `current_hour()`, `current_minute()` - Time utilities
-  - `is_weekend()`, `is_workday()` - Day type checks
-  - `get_counter(name)`, `set_counter(name, val)` - Persistent counters
-  - `get_flag(name)`, `set_flag(name, val)` - Persistent flags
-  - `log(msg)` - Console logging
+- Available Rhai APIs:
+  - **Time**: `hour()`, `minute()`, `second()`, `weekday()`, `time_str()`, `date_str()`, `in_time_range(start, end)`, `is_weekend()`, `is_workday()`
+  - **Actions**: `speak(text)`, `lock_screen()`, `shutdown(delay_secs)`, `chime(hour)`, `log(msg)`
+  - **Screen**: `screen_locked()` - check if screen is currently locked
+  - **TTS config**: `configure_tts(api_key, voice)`
+  - **Environment**: `get_env(name)`, `has_env(name)` - read from GlobalConfig
+  - **Calendar**: `generate_script_events(script_name)` - simulate and persist events to `events.json`
 
 **Task Scheduler Architecture**:
 - Persistent process (does NOT exit after launch)
 - 30-second polling loop triggers `on_tick` for rules with matching time/weekday
+- TimeIndex (`rhai/index.rs`) provides efficient time-based rule lookups
 - Lock/unlock events trigger `on_lock` and `on_unlock` handlers
 - Windows: Uses `WTSRegisterSessionNotification` for lockscreen detection
-- Web UI: Axum server with script editing capability
 - Single instance: PID-based lock prevents multiple scheduler instances
-
-**Windows Autostart**:
-- Creates VBS script in `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`
-- Script launches Git Bash with `yo run auto --web` command
-- Auto-detects Git Bash via registry, common paths, or PATH environment
 
 **Template Cloning Flow** (`clone_command.rs`):
 1. Interactive prompts for source directory and keywords
 2. Parse keywords in any format (kebab-case, snake_case, PascalCase, camelCase)
 3. Generate all variants: kebab-case, snake_case, PascalCase, camelCase, SCREAMING_SNAKE
 4. Walk directory tree and replace in both filenames and file contents
-5. Smart replacement using regex to preserve word boundaries
 
 **SOCKS5 Proxy Flow**:
-1. Check Docker installation → auto-install if missing
+1. Check Docker installation (auto-install if missing)
 2. Pull `ginuerzh/gost` image
-3. Generate random port + password
+3. Generate random port (30000-40000) + password (20 chars)
 4. Start container with SOCKS5 listener
 5. Validate connectivity via `socket2` probe
 
 **Error Handling**:
 - Uses `thiserror` for structured error types per module
 - Commands return `anyhow::Result<()>` for flexibility
-- All errors propagate to `main.rs` for user-friendly display
+- Errors propagate to `main.rs` for user-friendly display
 
 ## Configuration Files
 
-- `~/.yo/rules/*.rhai` - Rhai script rules (created on first run with default examples)
-- `~/.yo/yo-auto.pid` - PID file for single instance lock (auto command)
+- `~/.yo/rules/*.rhai` - Rhai script rules (default examples created on first run)
+- `~/.yo/config.json` - Global environment variables for Rhai scripts
+- `~/.yo/events.json` - Generated calendar events from script simulation
+- `~/.yo/yo-auto.pid` - PID file for single instance lock
 - `~/.yo/github_token.enc` - Encrypted GitHub personal access token
 - `~/.ssh/config` - Modified by `init` command to add deploy key aliases
 - `voice/` directory - Generated TTS audio files
-- `%APPDATA%\...\Startup\yo-auto-web.vbs` - Windows autostart script (when installed)
+- `%APPDATA%\...\Startup\yo-auto-web.vbs` - Windows autostart script
 
 ## Rhai Script Example
 
 ```rhai
 // ~/.yo/rules/night_lockscreen.rhai
 
-// Trigger configuration
 let trigger = #{
     time_range: ["21:30", "05:00"],
     interval_minutes: 5,
     events: ["tick"],
-    weekdays: [1, 2, 3, 4, 5, 6, 7],  // All days
+    weekdays: [1, 2, 3, 4, 5, 6, 7],
     enabled: true,
 };
 
-// Called every 30 seconds when in time range
 fn on_tick() {
     speak("Time to rest");
     lock_screen();
 }
 
-// Called when screen is unlocked
 fn on_unlock() {
     let count = get_counter("unlock_count") + 1;
     set_counter("unlock_count", count);
@@ -239,33 +191,28 @@ fn on_unlock() {
 
 ## Testing Strategy
 
-When writing tests:
 - Unit tests go in same file as `#[cfg(test)] mod tests`
 - Integration tests for GitHub API should mock HTTP responses
 - Crypto tests should verify encrypt/decrypt round-trips
 - Task scheduler tests should use fixed time mocks (avoid sleep-based tests)
+- Some TTS tests are marked `#[ignore]` since they require API keys
 
 ## Platform-Specific Code
 
-**Windows-specific**:
-- `Cargo.toml` includes `windows` crate with session monitoring features
-- `screen/monitor.rs` uses Win32 APIs for session state
-- Audio playback uses `rodio` crate
+All platform-specific code uses `#[cfg(target_os = "...")]` conditional compilation:
 
-**Cross-platform lockscreen**:
-- Linux: `loginctl lock-session` or `gnome-screensaver-command`
-- macOS: `pmset displaysleepnow`
-- Windows: `rundll32.exe user32.dll,LockWorkStation`
+- **Windows**: `windows` crate for WTS session monitoring, `rundll32.exe` for lockscreen, registry queries for Git Bash detection, `tasklist` for PID checks
+- **Linux**: `/proc/{pid}` for process checks, `loginctl lock-session` for lockscreen, `/sys/class/net/` for MAC address
+- **macOS**: `pmset displaysleepnow` for lockscreen
 
 ## Important Notes
 
 - **Pure Rust crypto**: Uses `aes` + `cbc` crates (NOT OpenSSL) for portability
 - **reqwest**: Configured with `rustls-tls` (not native-tls) to avoid OpenSSL dependency
-- **Release profile**: Aggressive optimization with LTO and symbol stripping
+- **Release profile**: Aggressive optimization with `opt-level = 3`, LTO and symbol stripping
 - **Task scheduler**: Designed to run indefinitely - do NOT add auto-exit logic
-- **SSH keys**: Always generates Ed25519 (not RSA) for better security and performance
-- **Main entry point**: All commands are dispatched through `main.rs` using pattern matching on CLI args
-- **Colored output**: Extensive use of `colored` crate for user feedback (green for success, red for errors, yellow for warnings, blue for info)
-- **Interactive prompts**: Uses `inquire` crate for multi-select, text input, and confirmation dialogs
-- **Rhai scripting**: Task logic is defined in `.rhai` scripts, enabling runtime customization without recompilation
-- **Async runtime**: Tokio is used for async operations, primarily for Web UI
+- **SSH keys**: Always generates Ed25519 (not RSA)
+- **Colored output**: Extensive use of `colored` crate (green=success, red=error, yellow=warning, blue=info, cyan=action)
+- **Interactive prompts**: Uses `inquire` crate for user input dialogs
+- **Async runtime**: Tokio used for Web UI server; most other code is synchronous
+- **Concurrency**: `Arc<Mutex<T>>` for shared state in scheduler, `lazy_static` for globals
