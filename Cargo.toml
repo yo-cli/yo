@@ -78,6 +78,8 @@ walkdir = "2.5"
 rhai = { version = "1.19", features = ["sync"] }
 # CLI argument parsing
 clap = { version = "4", features = ["derive"] }
+# Home directory detection
+dirs-next = "2.0"
 
 [target.'cfg(unix)'.dependencies]
 # Unix system calls

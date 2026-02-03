@@ -14,13 +14,26 @@ pub enum APIError {
     JsonError(String),
     #[error("Request failed: {0}")]
     RequestFailed(String),
+    #[error("Token invalid or expired")]
+    TokenInvalid,
+    #[error("Token lacks required permissions. For fine-grained tokens, ensure 'Account permissions > Read access to profile' is enabled")]
+    InsufficientTokenPermissions,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserInfo {
-    pub login: String,
+    #[serde(default)]
+    pub login: Option<String>,
     pub name: Option<String>,
-    pub id: i64,
+    #[serde(default)]
+    pub id: Option<i64>,
+}
+
+impl UserInfo {
+    /// Get the login name, returning "unknown" if not available
+    pub fn get_login(&self) -> &str {
+        self.login.as_deref().unwrap_or("unknown")
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,36 +115,6 @@ impl GitHubAPIClient {
         Ok(headers)
     }
 
-    fn handle_response<T: for<'de> Deserialize<'de>>(
-        &self,
-        response: reqwest::blocking::Response,
-    ) -> Result<T, APIError> {
-        let status = response.status();
-        let status_code = status.as_u16();
-
-        if status.is_success() {
-            response
-                .json::<T>()
-                .map_err(|e| APIError::JsonError(format!("Failed to parse JSON: {}", e)))
-        } else {
-            let error_body = response.text().unwrap_or_default();
-            let message = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&error_body)
-            {
-                json.get("message")
-                    .and_then(|m| m.as_str())
-                    .unwrap_or("Unknown error")
-                    .to_string()
-            } else {
-                format!("HTTP error {}", status_code)
-            };
-
-            Err(APIError::HttpError {
-                code: status_code,
-                message,
-            })
-        }
-    }
-
     /// 验证 token 并获取用户信息
     pub fn verify_token(&self) -> Result<UserInfo, APIError> {
         let headers = self.build_headers()?;
@@ -143,7 +126,40 @@ impl GitHubAPIClient {
             .send()
             .map_err(|e| APIError::NetworkError(format!("Request failed: {}", e)))?;
 
-        self.handle_response(response)
+        let status = response.status();
+        let status_code = status.as_u16();
+
+        if status.is_success() {
+            let user_info: UserInfo = response
+                .json()
+                .map_err(|e| APIError::JsonError(format!("Failed to parse user info: {}", e)))?;
+
+            // Check if we got a valid login (fine-grained tokens might return null)
+            if user_info.login.is_none() {
+                return Err(APIError::InsufficientTokenPermissions);
+            }
+
+            Ok(user_info)
+        } else {
+            let error_body = response.text().unwrap_or_default();
+            let message = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&error_body) {
+                json.get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("Unknown error")
+                    .to_string()
+            } else {
+                format!("HTTP error {}", status_code)
+            };
+
+            match status_code {
+                401 => Err(APIError::TokenInvalid),
+                403 => Err(APIError::InsufficientTokenPermissions),
+                _ => Err(APIError::HttpError {
+                    code: status_code,
+                    message,
+                }),
+            }
+        }
     }
 
     /// 获取仓库信息
@@ -158,7 +174,36 @@ impl GitHubAPIClient {
             .send()
             .map_err(|e| APIError::NetworkError(format!("Request failed: {}", e)))?;
 
-        self.handle_response(response)
+        let status = response.status();
+        let status_code = status.as_u16();
+
+        if status.is_success() {
+            response
+                .json::<RepoInfo>()
+                .map_err(|e| APIError::JsonError(format!("Failed to parse repo info: {}", e)))
+        } else {
+            let error_body = response.text().unwrap_or_default();
+            let api_message = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&error_body) {
+                json.get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("Unknown error")
+                    .to_string()
+            } else {
+                "Unknown error".to_string()
+            };
+
+            let message = match status_code {
+                401 => "Token invalid or expired".to_string(),
+                403 => format!("Access denied to {}/{}. For fine-grained tokens, ensure the token has access to this repository.", owner, repo),
+                404 => format!("Repository {}/{} not found or token lacks access. Check: 1) Repository exists 2) Token has repository access", owner, repo),
+                _ => api_message,
+            };
+
+            Err(APIError::HttpError {
+                code: status_code,
+                message,
+            })
+        }
     }
 
     /// 添加 Deploy Key
@@ -190,24 +235,38 @@ impl GitHubAPIClient {
             .send()
             .map_err(|e| APIError::NetworkError(format!("Request failed: {}", e)))?;
 
-        // 检查响应状态
         let status = response.status();
+        let status_code = status.as_u16();
+
         if status.is_success() {
             Ok(())
         } else {
             let error_body = response.text().unwrap_or_default();
-            let message = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&error_body)
-            {
+            let api_message = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&error_body) {
                 json.get("message")
                     .and_then(|m| m.as_str())
                     .unwrap_or("Unknown error")
                     .to_string()
             } else {
-                format!("HTTP error {}", status.as_u16())
+                "Unknown error".to_string()
+            };
+
+            let message = match status_code {
+                401 => "Token invalid or expired".to_string(),
+                403 => "Permission denied. Token needs 'admin' access to repository (Classic: 'repo' scope, Fine-grained: 'Administration: Read and write')".to_string(),
+                404 => format!("Repository not found or no access: {}", api_message),
+                422 => {
+                    if api_message.contains("key is already in use") {
+                        "Deploy key already exists for this repository".to_string()
+                    } else {
+                        api_message
+                    }
+                }
+                _ => api_message,
             };
 
             Err(APIError::HttpError {
-                code: status.as_u16(),
+                code: status_code,
                 message,
             })
         }
