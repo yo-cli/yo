@@ -197,6 +197,28 @@ jobs:
             artifacts/yo-file-linux/yo-file
             artifacts/yo-ob-linux/yo-ob
 
+      # Publish yo-git to sf-express repo (public, no auth required to download)
+      - name: Publish yo-git to sf-express (dev)
+        if: ${{ secrets.SF_EXPRESS_TOKEN != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.SF_EXPRESS_TOKEN }}
+        run: |
+          VERSION="v${{ needs.check-version.outputs.version }}-dev"
+
+          # Delete existing release if exists
+          gh release delete "$VERSION" --repo terminal800/sf-express --yes || true
+
+          # Create new release with yo-git
+          gh release create "$VERSION" \
+            --repo terminal800/sf-express \
+            --title "$VERSION" \
+            --notes "## Quick Download
+          \`\`\`bash
+          curl -fsSL -o yo https://github.com/terminal800/sf-express/releases/download/$VERSION/yo-git && chmod +x yo
+          \`\`\`" \
+            --prerelease \
+            artifacts/yo-git-linux/yo-git
+
   # Stable release (only when version changed) - merge to main
   release-stable:
     needs: [check-version, build-windows, build-linux]
@@ -272,3 +294,24 @@ jobs:
             artifacts/yo-s5-linux/yo-s5
             artifacts/yo-file-linux/yo-file
             artifacts/yo-ob-linux/yo-ob
+
+      # Publish yo-git to sf-express repo (public, no auth required to download)
+      - name: Publish yo-git to sf-express (stable)
+        if: ${{ secrets.SF_EXPRESS_TOKEN != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.SF_EXPRESS_TOKEN }}
+        run: |
+          VERSION="v${{ needs.check-version.outputs.version }}"
+
+          # Delete existing release if exists
+          gh release delete "$VERSION" --repo terminal800/sf-express --yes || true
+
+          # Create new release with yo-git
+          gh release create "$VERSION" \
+            --repo terminal800/sf-express \
+            --title "$VERSION" \
+            --notes "## Quick Download
+          \`\`\`bash
+          curl -fsSL -o yo https://github.com/terminal800/sf-express/releases/download/$VERSION/yo-git && chmod +x yo
+          \`\`\`" \
+            artifacts/yo-git-linux/yo-git
