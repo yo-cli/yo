@@ -25,6 +25,11 @@ path = "src/bin/yo_git.rs"
 name = "yo-s5"
 path = "src/bin/yo_s5.rs"
 
+# Binary: File utilities (Linux musl)
+[[bin]]
+name = "yo-file"
+path = "src/bin/yo_file.rs"
+
 # Binary: Placeholder for future features (Linux musl)
 [[bin]]
 name = "yo-ob"

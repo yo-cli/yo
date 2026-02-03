@@ -2,7 +2,7 @@
 
 use colored::Colorize;
 use std::env;
-use yo_lib::commands::{AutoCommand, CloneCommand, TestCommand, VeCommand};
+use yo_lib::commands::{AutoCommand, TestCommand, VeCommand};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -19,7 +19,6 @@ fn show_usage() {
     println!("  --autostart                      Install autostart (Windows only)");
     println!("  --autostart remove               Remove autostart");
     println!("  --autostart status               Show autostart status");
-    println!("  clone                            Clone template with keyword replacement");
     println!("  test                             Test hourly chime playback");
     println!("  ve                               Test Volcengine TTS synthesis");
 }
@@ -79,15 +78,6 @@ fn main() {
             .unwrap_or(9999);
 
         if let Err(e) = AutoCommand::execute_with_web(port) {
-            println!("{}", format!("✗ {}", e).red().bold());
-            std::process::exit(1);
-        }
-        return;
-    }
-
-    // clone
-    if arg1 == "clone" {
-        if let Err(e) = CloneCommand::execute() {
             println!("{}", format!("✗ {}", e).red().bold());
             std::process::exit(1);
         }
