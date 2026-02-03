@@ -1,4 +1,5 @@
 // yo-git: GitHub SSH key management (Linux musl)
+// After download, rename to `yo` and use as: yo init @username/repo
 
 use colored::Colorize;
 use std::env;
@@ -7,11 +8,14 @@ use yo_lib::commands::{GitHubInitCommand, InitMode};
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn show_version() {
-    println!("yo-git version {}", VERSION);
+    println!("yo version {}", VERSION);
 }
 
 fn show_usage() {
-    println!("Usage: yo-git [OPTIONS] @username/repo");
+    println!("Usage: yo init [OPTIONS] @username/repo");
+    println!();
+    println!("Commands:");
+    println!("  init @username/repo    Initialize GitHub repository access");
     println!();
     println!("Options:");
     println!("  -v, --version          Show version information");
@@ -20,9 +24,9 @@ fn show_usage() {
     println!("  --ssh                  Use SSH deploy key (default)");
     println!();
     println!("Examples:");
-    println!("  yo-git @myuser/myrepo           # SSH deploy key (default)");
-    println!("  yo-git @myuser/myrepo --https   # HTTPS with token");
-    println!("  yo-git @myuser/myrepo --ssh     # SSH deploy key (explicit)");
+    println!("  yo init @username/repo           # Interactive mode selection");
+    println!("  yo init @username/repo --https   # HTTPS with token");
+    println!("  yo init @username/repo --ssh     # SSH deploy key");
 }
 
 fn main() {
@@ -35,9 +39,10 @@ fn main() {
 
     // Parse arguments
     let mut repo_spec: Option<String> = None;
-    let mut mode = InitMode::Interactive; // Default to interactive selection
+    let mut mode = InitMode::Interactive;
     let mut show_help = false;
     let mut show_ver = false;
+    let mut has_init_command = false;
 
     for arg in args.iter().skip(1) {
         match arg.as_str() {
@@ -45,6 +50,7 @@ fn main() {
             "-h" | "--help" => show_help = true,
             "--https" => mode = InitMode::Https,
             "--ssh" => mode = InitMode::Ssh,
+            "init" => has_init_command = true,
             s if s.starts_with('@') => repo_spec = Some(s.to_string()),
             _ => {
                 println!("{}", format!("✗ Unknown option: {}", arg).red().bold());
@@ -66,19 +72,28 @@ fn main() {
     show_version();
     println!();
 
-    // Handle @username/repo format
-    if let Some(spec) = repo_spec {
-        if let Err(e) = GitHubInitCommand::execute(&spec, mode) {
-            println!("{}", format!("✗ {}", e).red().bold());
+    // Handle init command
+    if has_init_command || repo_spec.is_some() {
+        if let Some(spec) = repo_spec {
+            if let Err(e) = GitHubInitCommand::execute(&spec, mode) {
+                println!("{}", format!("✗ {}", e).red().bold());
+                std::process::exit(1);
+            }
+            return;
+        } else {
+            println!(
+                "{}",
+                "✗ Repository specification required".red().bold()
+            );
+            println!("{}", "ℹ Usage: yo init @username/repo [--https|--ssh]".blue());
             std::process::exit(1);
         }
-        return;
     }
 
     println!(
         "{}",
-        "✗ Repository specification required".red().bold()
+        "✗ Command required".red().bold()
     );
-    println!("{}", "ℹ Usage: yo-git @username/repo [--https|--ssh]".blue());
+    println!("{}", "ℹ Usage: yo init @username/repo [--https|--ssh]".blue());
     std::process::exit(1);
 }
