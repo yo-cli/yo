@@ -4,4 +4,5 @@ pub mod auto;
 pub mod commands;
 pub mod common;
 pub mod github;
+pub mod ob;
 pub mod s5;

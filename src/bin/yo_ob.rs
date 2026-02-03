@@ -1,31 +1,43 @@
-// yo-ob: Placeholder for future features (Linux musl)
+// yo-ob: OceanBase environment preparation tool (Linux only)
 
-use std::env;
+use clap::{Parser, Subcommand};
+use colored::Colorize;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-fn show_version() {
-    println!("yo-ob version {}", VERSION);
+#[derive(Parser)]
+#[command(name = "yo-ob")]
+#[command(about = format!("OceanBase operations tool (v{})", VERSION), long_about = None)]
+#[command(version = VERSION)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
 }
 
-fn show_usage() {
-    println!("yo-ob v{}", VERSION);
-    println!();
-    println!("This binary is a placeholder for future features.");
-    println!("Stay tuned for updates!");
+#[derive(Subcommand)]
+enum Commands {
+    /// Prepare OceanBase environment
+    Prepare {
+        /// Force mode, skip all confirmations
+        #[arg(short, long)]
+        force: bool,
+    },
+    /// Check OceanBase configuration
+    Check,
 }
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
+    let cli = Cli::parse();
 
-    if args.len() >= 2 {
-        let arg1 = &args[1];
+    println!("{} {}\n", "yo-ob version:".cyan(), VERSION);
 
-        if arg1 == "-v" || arg1 == "--version" {
-            show_version();
-            return;
-        }
+    let result = match cli.command {
+        Commands::Prepare { force } => yo_lib::ob::commands::prepare::run(force),
+        Commands::Check => yo_lib::ob::commands::check::run(),
+    };
+
+    if let Err(e) = result {
+        eprintln!("{}", format!("✗ {}", e).red().bold());
+        std::process::exit(1);
     }
-
-    show_usage();
 }

@@ -76,6 +76,12 @@ inquire = "0.9"
 walkdir = "2.5"
 # Rhai scripting engine
 rhai = { version = "1.19", features = ["sync"] }
+# CLI argument parsing
+clap = { version = "4", features = ["derive"] }
+
+[target.'cfg(unix)'.dependencies]
+# Unix system calls
+nix = { version = "0.29", features = ["user"] }
 
 [target.'cfg(windows)'.dependencies]
 # Windows API for session monitoring
