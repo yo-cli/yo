@@ -7,9 +7,6 @@ use cbc::{
 };
 use sha2::{Sha256, Digest};
 use rand::Rng;
-#[cfg(target_os = "linux")]
-use std::fs;
-use std::io;
 use thiserror::Error;
 
 type Aes256CbcEnc = Encryptor<Aes256>;
@@ -20,14 +17,10 @@ const AES_BLOCK_SIZE: usize = 16;
 
 #[derive(Debug, Error)]
 pub enum CryptoError {
-    #[error("Failed to get MAC address: {0}")]
-    MacAddressError(String),
     #[error("Encryption error: {0}")]
     EncryptionError(String),
     #[error("Decryption error: {0}")]
     DecryptionError(String),
-    #[error("IO error: {0}")]
-    IoError(#[from] io::Error),
     #[error("Invalid ciphertext length")]
     InvalidCiphertextLength,
 }
@@ -35,36 +28,6 @@ pub enum CryptoError {
 pub struct CryptoUtils;
 
 impl CryptoUtils {
-    /// 获取 MAC 地址
-    pub fn get_mac_address() -> Result<String, CryptoError> {
-        #[cfg(target_os = "linux")]
-        {
-            // 尝试读取网络接口信息
-            let interfaces = vec!["eth0", "ens33", "enp0s3", "wlan0"];
-
-            for iface in interfaces {
-                let path = format!("/sys/class/net/{}/address", iface);
-                if let Ok(mac) = fs::read_to_string(&path) {
-                    let mac = mac.trim().to_string();
-                    if !mac.is_empty() {
-                        return Ok(mac);
-                    }
-                }
-            }
-
-            Err(CryptoError::MacAddressError(
-                "Failed to get MAC address from any interface".to_string(),
-            ))
-        }
-
-        #[cfg(not(target_os = "linux"))]
-        {
-            Err(CryptoError::MacAddressError(
-                "MAC address retrieval not supported on this platform".to_string(),
-            ))
-        }
-    }
-
     /// SHA256 哈希
     fn sha256(input: &str) -> Vec<u8> {
         let mut hasher = Sha256::new();
@@ -72,14 +35,11 @@ impl CryptoUtils {
         hasher.finalize().to_vec()
     }
 
-    /// 生成加密密钥(基于 MAC 地址和盐值)
-    pub fn generate_key() -> Result<Vec<u8>, CryptoError> {
-        let mac = Self::get_mac_address()?;
-        let combined = format!("{}{}", mac, SALT);
-        let hashed = Self::sha256(&combined);
-
+    /// 生成加密密钥(基于固定盐值)
+    pub fn generate_key() -> Vec<u8> {
+        let hashed = Self::sha256(SALT);
         // 取前32字节作为AES-256密钥
-        Ok(hashed[..32].to_vec())
+        hashed[..32].to_vec()
     }
 
     /// Base64 编码
@@ -144,14 +104,14 @@ impl CryptoUtils {
 
     /// 加密字符串
     pub fn encrypt(plaintext: &str) -> Result<String, CryptoError> {
-        let key = Self::generate_key()?;
+        let key = Self::generate_key();
         let encrypted = Self::aes_encrypt(plaintext, &key)?;
         Ok(Self::base64_encode(&encrypted))
     }
 
     /// 解密字符串
     pub fn decrypt(ciphertext: &str) -> Result<String, CryptoError> {
-        let key = Self::generate_key()?;
+        let key = Self::generate_key();
         let decoded = Self::base64_decode(ciphertext)?;
         let decrypted = Self::aes_decrypt(&decoded, &key)?;
         String::from_utf8(decrypted)
