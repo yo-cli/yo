@@ -53,7 +53,11 @@
       "Bash(git checkout:*)",
       "Bash(wc:*)",
       "Bash(done)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(dir:*)",
+      "Bash(./target/release/yo-auto.exe:*)",
+      "Bash(./target/release/yo-git.exe:*)",
+      "Bash(./target/release/yo-s5.exe:*)"
     ],
     "deny": [],
     "ask": []

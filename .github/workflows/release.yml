@@ -1,0 +1,102 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Windows build (yo-auto)
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build yo-auto
+        run: cargo build --release --bin yo-auto
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: yo-auto-windows
+          path: target/release/yo-auto.exe
+          if-no-files-found: error
+
+  # Linux musl build (yo-git + yo-s5 + yo-ob)
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl-tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build Linux binaries
+        run: |
+          cargo build --release --target x86_64-unknown-linux-musl --bin yo-git
+          cargo build --release --target x86_64-unknown-linux-musl --bin yo-s5
+          cargo build --release --target x86_64-unknown-linux-musl --bin yo-ob
+
+      - name: Upload yo-git
+        uses: actions/upload-artifact@v4
+        with:
+          name: yo-git-linux
+          path: target/x86_64-unknown-linux-musl/release/yo-git
+          if-no-files-found: error
+
+      - name: Upload yo-s5
+        uses: actions/upload-artifact@v4
+        with:
+          name: yo-s5-linux
+          path: target/x86_64-unknown-linux-musl/release/yo-s5
+          if-no-files-found: error
+
+      - name: Upload yo-ob
+        uses: actions/upload-artifact@v4
+        with:
+          name: yo-ob-linux
+          path: target/x86_64-unknown-linux-musl/release/yo-ob
+          if-no-files-found: error
+
+  # Publish to GitHub Releases
+  release:
+    needs: [build-windows, build-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Display structure
+        run: ls -R artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/yo-auto-windows/yo-auto.exe
+            artifacts/yo-git-linux/yo-git
+            artifacts/yo-s5-linux/yo-s5
+            artifacts/yo-ob-linux/yo-ob

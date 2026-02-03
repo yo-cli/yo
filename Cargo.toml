@@ -5,10 +5,30 @@ edition = "2021"
 authors = ["Your Name <you@example.com>"]
 description = "A multi-functional command-line tool with GitHub SSH key management and SOCKS5 proxy"
 
-# 主程序
+# Shared library
+[lib]
+name = "yo_lib"
+path = "src/lib.rs"
+
+# Binary: Task scheduler with TTS and Web UI (Windows only)
 [[bin]]
-name = "yo"
-path = "src/main.rs"
+name = "yo-auto"
+path = "src/bin/yo_auto.rs"
+
+# Binary: GitHub SSH key management (Linux musl)
+[[bin]]
+name = "yo-git"
+path = "src/bin/yo_git.rs"
+
+# Binary: SOCKS5 proxy service (Linux musl)
+[[bin]]
+name = "yo-s5"
+path = "src/bin/yo_s5.rs"
+
+# Binary: Placeholder for future features (Linux musl)
+[[bin]]
+name = "yo-ob"
+path = "src/bin/yo_ob.rs"
 
 [dependencies]
 # Async runtime
