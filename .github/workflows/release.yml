@@ -199,7 +199,7 @@ jobs:
 
       # Publish yo-git to sf-express repo (public, no auth required to download)
       - name: Publish yo-git to sf-express (dev)
-        if: ${{ secrets.SF_EXPRESS_TOKEN != '' }}
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.SF_EXPRESS_TOKEN }}
         run: |
@@ -297,7 +297,7 @@ jobs:
 
       # Publish yo-git to sf-express repo (public, no auth required to download)
       - name: Publish yo-git to sf-express (stable)
-        if: ${{ secrets.SF_EXPRESS_TOKEN != '' }}
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.SF_EXPRESS_TOKEN }}
         run: |
