@@ -16,7 +16,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Check if version changed (for release decision)
+  # Get version info
   check-version:
     runs-on: ubuntu-latest
     outputs:
@@ -126,8 +126,54 @@ jobs:
           path: target/x86_64-unknown-linux-musl/release/yo-ob
           if-no-files-found: error
 
-  # Merge to main, create tag, and release (only when version changed)
-  release:
+  # Dev release (every push to dev) - prerelease
+  release-dev:
+    needs: [check-version, build-windows, build-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Display structure
+        run: ls -R artifacts
+
+      - name: Delete existing dev release
+        run: gh release delete "v${{ needs.check-version.outputs.version }}-dev" --yes || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Delete existing dev tag
+        run: git push origin :refs/tags/v${{ needs.check-version.outputs.version }}-dev || true
+
+      - name: Create Dev Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.check-version.outputs.version }}-dev
+          name: v${{ needs.check-version.outputs.version }}-dev
+          body: |
+            ## Development Build
+
+            ⚠️ This is a **development** release from the `dev` branch.
+
+            - Branch: `dev`
+            - Commit: ${{ github.sha }}
+            - Built at: ${{ github.event.head_commit.timestamp }}
+
+            For stable releases, see the latest non-dev version.
+          prerelease: true
+          files: |
+            artifacts/yo-auto-windows/yo-auto.exe
+            artifacts/yo-git-linux/yo-git
+            artifacts/yo-s5-linux/yo-s5
+            artifacts/yo-file-linux/yo-file
+            artifacts/yo-ob-linux/yo-ob
+
+  # Stable release (only when version changed) - merge to main
+  release-stable:
     needs: [check-version, build-windows, build-linux]
     if: needs.check-version.outputs.version_changed == 'true'
     runs-on: ubuntu-latest
@@ -162,11 +208,13 @@ jobs:
       - name: Display structure
         run: ls -R artifacts
 
-      - name: Create Release
+      - name: Create Stable Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ needs.check-version.outputs.version }}
+          name: v${{ needs.check-version.outputs.version }}
           generate_release_notes: true
+          prerelease: false
           files: |
             artifacts/yo-auto-windows/yo-auto.exe
             artifacts/yo-git-linux/yo-git
