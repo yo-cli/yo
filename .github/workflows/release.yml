@@ -64,8 +64,8 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Build yo-auto
-        run: cargo build --release --bin yo-auto
+      - name: Build yo-auto (with audio support)
+        run: cargo build --release --bin yo-auto --features audio
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

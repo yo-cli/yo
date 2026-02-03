@@ -1,4 +1,4 @@
-//! 音频播放
+//! 音频播放 - 真实实现 (需要 audio feature)
 
 use super::error::TtsError;
 use colored::Colorize;
@@ -14,11 +14,15 @@ const HOUR_CHIME_AUDIO: &[u8] = include_bytes!("../../../voice/clock/Hour_Chime_
 pub fn play_audio(file_path: &PathBuf) -> Result<(), TtsError> {
     if !file_path.exists() {
         return Err(TtsError::PlayAudioFailed(format!(
-            "Audio file not found: {}", file_path.display()
+            "Audio file not found: {}",
+            file_path.display()
         )));
     }
 
-    println!("{}", format!("  🔊 Playing: {}", file_path.display()).green());
+    println!(
+        "{}",
+        format!("  🔊 Playing: {}", file_path.display()).green()
+    );
 
     let file = File::open(file_path)
         .map_err(|e| TtsError::PlayAudioFailed(format!("Failed to open: {}", e)))?;
@@ -72,7 +76,8 @@ pub fn play_hourly_chime() -> Result<(), TtsError> {
         play_audio(&chime_file)
     } else {
         Err(TtsError::PlayAudioFailed(format!(
-            "Hour chime not found: {}", chime_file.display()
+            "Hour chime not found: {}",
+            chime_file.display()
         )))
     }
 }

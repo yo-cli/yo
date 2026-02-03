@@ -66,8 +66,8 @@ socket2 = "0.6"
 # System utilities
 hostname = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
-# Audio playback
-rodio = "0.21"
+# Audio playback (optional, Windows only)
+rodio = { version = "0.21", optional = true }
 # Lazy static for global state
 lazy_static = "1.4"
 # Interactive prompts
@@ -80,6 +80,10 @@ rhai = { version = "1.19", features = ["sync"] }
 clap = { version = "4", features = ["derive"] }
 # Home directory detection
 dirs-next = "2.0"
+
+[features]
+default = []
+audio = ["rodio"]
 
 [target.'cfg(unix)'.dependencies]
 # Unix system calls
