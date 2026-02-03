@@ -164,6 +164,31 @@ jobs:
             - Built at: ${{ github.event.head_commit.timestamp }}
 
             For stable releases, see the latest non-dev version.
+
+            ---
+
+            ## Quick Download
+
+            **Linux (download as `yo`):**
+            ```bash
+            # yo-git (GitHub SSH key management)
+            curl -fsSL -o yo https://github.com/${{ github.repository }}/releases/download/v${{ needs.check-version.outputs.version }}-dev/yo-git && chmod +x yo
+
+            # yo-s5 (SOCKS5 proxy)
+            curl -fsSL -o yo https://github.com/${{ github.repository }}/releases/download/v${{ needs.check-version.outputs.version }}-dev/yo-s5 && chmod +x yo
+
+            # yo-file (File utilities)
+            curl -fsSL -o yo https://github.com/${{ github.repository }}/releases/download/v${{ needs.check-version.outputs.version }}-dev/yo-file && chmod +x yo
+
+            # yo-ob (OceanBase tool)
+            curl -fsSL -o yo https://github.com/${{ github.repository }}/releases/download/v${{ needs.check-version.outputs.version }}-dev/yo-ob && chmod +x yo
+            ```
+
+            **Windows (download as `yo.exe`):**
+            ```bash
+            # yo-auto (Task scheduler with TTS)
+            curl -fsSL -o yo.exe https://github.com/${{ github.repository }}/releases/download/v${{ needs.check-version.outputs.version }}-dev/yo-auto.exe
+            ```
           prerelease: true
           files: |
             artifacts/yo-auto-windows/yo-auto.exe
@@ -213,6 +238,32 @@ jobs:
         with:
           tag_name: v${{ needs.check-version.outputs.version }}
           name: v${{ needs.check-version.outputs.version }}
+          body: |
+            ## Quick Download
+
+            **Linux (download as `yo`):**
+            ```bash
+            # yo-git (GitHub SSH key management)
+            curl -fsSL -o yo https://github.com/${{ github.repository }}/releases/download/v${{ needs.check-version.outputs.version }}/yo-git && chmod +x yo
+
+            # yo-s5 (SOCKS5 proxy)
+            curl -fsSL -o yo https://github.com/${{ github.repository }}/releases/download/v${{ needs.check-version.outputs.version }}/yo-s5 && chmod +x yo
+
+            # yo-file (File utilities)
+            curl -fsSL -o yo https://github.com/${{ github.repository }}/releases/download/v${{ needs.check-version.outputs.version }}/yo-file && chmod +x yo
+
+            # yo-ob (OceanBase tool)
+            curl -fsSL -o yo https://github.com/${{ github.repository }}/releases/download/v${{ needs.check-version.outputs.version }}/yo-ob && chmod +x yo
+            ```
+
+            **Windows (download as `yo.exe`):**
+            ```bash
+            # yo-auto (Task scheduler with TTS)
+            curl -fsSL -o yo.exe https://github.com/${{ github.repository }}/releases/download/v${{ needs.check-version.outputs.version }}/yo-auto.exe
+            ```
+
+            ---
+
           generate_release_notes: true
           prerelease: false
           files: |
