@@ -30,7 +30,7 @@ path = "src/bin/yo_s5.rs"
 name = "yo-file"
 path = "src/bin/yo_file.rs"
 
-# Binary: Placeholder for future features (Linux musl)
+# Binary: OceanBase environment tool (Linux musl)
 [[bin]]
 name = "yo-ob"
 path = "src/bin/yo_ob.rs"
