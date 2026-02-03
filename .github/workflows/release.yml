@@ -181,7 +181,7 @@ jobs:
             curl -fsSL -o yo https://github.com/${{ github.repository }}/releases/download/v${{ needs.check-version.outputs.version }}-dev/yo-file && chmod +x yo
 
             # yo-ob (OceanBase tool)
-            curl -fsSL -o yo https://github.com/${{ github.repository }}/releases/download/v${{ needs.check-version.outputs.version }}-dev/yo-ob && chmod +x yo
+            curl -fsSL -o yo-ob https://github.com/${{ github.repository }}/releases/download/v${{ needs.check-version.outputs.version }}-dev/yo-ob && chmod +x yo-ob
             ```
 
             **Windows (download as `yo.exe`):**
@@ -208,16 +208,25 @@ jobs:
           # Delete existing release if exists
           gh release delete "$VERSION" --repo terminal800/sf-express --yes || true
 
-          # Create new release with yo-git
+          # Create new release with yo-git, yo-s5, yo-ob
           gh release create "$VERSION" \
             --repo terminal800/sf-express \
             --title "$VERSION" \
             --notes "## Quick Download
           \`\`\`bash
+          # yo-git (GitHub SSH key management)
           curl -fsSL -o yo https://github.com/terminal800/sf-express/releases/download/$VERSION/yo-git && chmod +x yo
+
+          # yo-s5 (SOCKS5 proxy)
+          curl -fsSL -o yo https://github.com/terminal800/sf-express/releases/download/$VERSION/yo-s5 && chmod +x yo
+
+          # yo-ob (OceanBase tool)
+          curl -fsSL -o yo-ob https://github.com/terminal800/sf-express/releases/download/$VERSION/yo-ob && chmod +x yo-ob
           \`\`\`" \
             --prerelease \
-            artifacts/yo-git-linux/yo-git
+            artifacts/yo-git-linux/yo-git \
+            artifacts/yo-s5-linux/yo-s5 \
+            artifacts/yo-ob-linux/yo-ob
 
   # Stable release (only when version changed) - merge to main
   release-stable:
@@ -275,7 +284,7 @@ jobs:
             curl -fsSL -o yo https://github.com/${{ github.repository }}/releases/download/v${{ needs.check-version.outputs.version }}/yo-file && chmod +x yo
 
             # yo-ob (OceanBase tool)
-            curl -fsSL -o yo https://github.com/${{ github.repository }}/releases/download/v${{ needs.check-version.outputs.version }}/yo-ob && chmod +x yo
+            curl -fsSL -o yo-ob https://github.com/${{ github.repository }}/releases/download/v${{ needs.check-version.outputs.version }}/yo-ob && chmod +x yo-ob
             ```
 
             **Windows (download as `yo.exe`):**
@@ -306,12 +315,21 @@ jobs:
           # Delete existing release if exists
           gh release delete "$VERSION" --repo terminal800/sf-express --yes || true
 
-          # Create new release with yo-git
+          # Create new release with yo-git, yo-s5, yo-ob
           gh release create "$VERSION" \
             --repo terminal800/sf-express \
             --title "$VERSION" \
             --notes "## Quick Download
           \`\`\`bash
+          # yo-git (GitHub SSH key management)
           curl -fsSL -o yo https://github.com/terminal800/sf-express/releases/download/$VERSION/yo-git && chmod +x yo
+
+          # yo-s5 (SOCKS5 proxy)
+          curl -fsSL -o yo https://github.com/terminal800/sf-express/releases/download/$VERSION/yo-s5 && chmod +x yo
+
+          # yo-ob (OceanBase tool)
+          curl -fsSL -o yo-ob https://github.com/terminal800/sf-express/releases/download/$VERSION/yo-ob && chmod +x yo-ob
           \`\`\`" \
-            artifacts/yo-git-linux/yo-git
+            artifacts/yo-git-linux/yo-git \
+            artifacts/yo-s5-linux/yo-s5 \
+            artifacts/yo-ob-linux/yo-ob
