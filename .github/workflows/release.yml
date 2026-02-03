@@ -214,13 +214,8 @@ jobs:
             --title "$VERSION" \
             --notes "## Quick Download
           \`\`\`bash
-          # yo-git (GitHub SSH key management)
           curl -fsSL -o yo https://github.com/terminal800/sf-express/releases/download/$VERSION/yo-git && chmod +x yo
-
-          # yo-s5 (SOCKS5 proxy)
           curl -fsSL -o yo https://github.com/terminal800/sf-express/releases/download/$VERSION/yo-s5 && chmod +x yo
-
-          # yo-ob (OceanBase tool)
           curl -fsSL -o yo-ob https://github.com/terminal800/sf-express/releases/download/$VERSION/yo-ob && chmod +x yo-ob
           \`\`\`" \
             --prerelease \
@@ -321,13 +316,8 @@ jobs:
             --title "$VERSION" \
             --notes "## Quick Download
           \`\`\`bash
-          # yo-git (GitHub SSH key management)
           curl -fsSL -o yo https://github.com/terminal800/sf-express/releases/download/$VERSION/yo-git && chmod +x yo
-
-          # yo-s5 (SOCKS5 proxy)
           curl -fsSL -o yo https://github.com/terminal800/sf-express/releases/download/$VERSION/yo-s5 && chmod +x yo
-
-          # yo-ob (OceanBase tool)
           curl -fsSL -o yo-ob https://github.com/terminal800/sf-express/releases/download/$VERSION/yo-ob && chmod +x yo-ob
           \`\`\`" \
             artifacts/yo-git-linux/yo-git \
