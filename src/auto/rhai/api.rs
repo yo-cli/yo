@@ -213,7 +213,7 @@ fn register_action_apis(engine: &mut Engine, state: Arc<Mutex<GlobalState>>) {
         }
     });
 
-    // speak
+    // speak(text) - 默认停顿 300ms
     let s = state.clone();
     engine.register_fn("speak", move |text: &str| {
         let st = s.lock().unwrap();
@@ -222,6 +222,25 @@ fn register_action_apis(engine: &mut Engine, state: Arc<Mutex<GlobalState>>) {
             let client = VolcengineTtsClient::new(key.clone());
             if let Err(e) = client.synthesize_and_play(text, voice) {
                 println!("{}", format!("⚠ TTS failed: {}", e).yellow());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        } else {
+            println!("{}", "⚠ TTS not configured".yellow());
+        }
+    });
+
+    // speak(text, pause_ms) - 自定义停顿时间
+    let s = state.clone();
+    engine.register_fn("speak", move |text: &str, pause_ms: i64| {
+        let st = s.lock().unwrap();
+        if let (Some(key), Some(voice)) = (&st.tts_api_key, &st.tts_voice) {
+            println!("{}", format!("🔊 Speaking: \"{}\"", text).blue());
+            let client = VolcengineTtsClient::new(key.clone());
+            if let Err(e) = client.synthesize_and_play(text, voice) {
+                println!("{}", format!("⚠ TTS failed: {}", e).yellow());
+            }
+            if pause_ms > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(pause_ms as u64));
             }
         } else {
             println!("{}", "⚠ TTS not configured".yellow());
@@ -427,6 +446,17 @@ pub fn create_simulation_engine(ctx: Arc<Mutex<SimulationContext>>) -> Engine {
     // 模拟 speak - 收集事件
     let c = ctx.clone();
     engine.register_fn("speak", move |text: &str| {
+        let mut ctx = c.lock().unwrap();
+        let time = format!("{:02}:{:02}", ctx.hour, ctx.minute);
+        ctx.events.push(SimulatedEvent {
+            time,
+            text: text.to_string(),
+        });
+    });
+
+    // 模拟 speak(text, pause_ms) - 收集事件（忽略 pause_ms）
+    let c = ctx.clone();
+    engine.register_fn("speak", move |text: &str, _pause_ms: i64| {
         let mut ctx = c.lock().unwrap();
         let time = format!("{:02}:{:02}", ctx.hour, ctx.minute);
         ctx.events.push(SimulatedEvent {

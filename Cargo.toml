@@ -1,6 +1,6 @@
 [package]
 name = "yo"
-version = "1.1.29"
+version = "1.1.30"
 edition = "2021"
 authors = ["Your Name <you@example.com>"]
 description = "A multi-functional command-line tool with GitHub SSH key management and SOCKS5 proxy"
