@@ -1054,10 +1054,8 @@
                 </div>
                 <div style="display:flex; align-items:center; gap:16px;">
                     <div class="pause-buttons" v-if="!status.paused">
-                        <button class="btn-pause" @click="pauseScheduler(10)">⏸ 10m</button>
-                        <button class="btn-pause" @click="pauseScheduler(20)">20m</button>
-                        <button class="btn-pause" @click="pauseScheduler(30)">30m</button>
-                        <button class="btn-pause" @click="pauseScheduler(60)">60m</button>
+                        <button class="btn-pause" @click="pauseScheduler(5)">⏸ 5m</button>
+                        <button class="btn-pause" @click="pauseScheduler(10)">10m</button>
                     </div>
                     <button class="btn-resume" v-if="status.paused" @click="resumeScheduler()">▶ Resume</button>
                 </div>

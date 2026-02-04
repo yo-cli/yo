@@ -216,6 +216,17 @@ fn register_action_apis(engine: &mut Engine, state: Arc<Mutex<GlobalState>>) {
         { let _ = Command::new("pmset").arg("displaysleepnow").status(); }
     });
 
+    // enter_sleep - 进入睡眠模式
+    engine.register_fn("enter_sleep", || {
+        println!("{}", "😴 Entering sleep mode...".cyan());
+        #[cfg(target_os = "windows")]
+        { let _ = Command::new("rundll32.exe").args(["powrprof.dll,SetSuspendState", "0,1,0"]).status(); }
+        #[cfg(target_os = "linux")]
+        { let _ = Command::new("systemctl").arg("suspend").status(); }
+        #[cfg(target_os = "macos")]
+        { let _ = Command::new("pmset").arg("sleepnow").status(); }
+    });
+
     // shutdown
     engine.register_fn("shutdown", |delay: i64| {
         println!("{}", format!("⚠️ Shutdown in {} seconds", delay).red().bold());
@@ -353,6 +364,7 @@ pub fn create_simulation_engine(ctx: Arc<Mutex<SimulationContext>>) -> Engine {
     // 空操作 - 模拟时不执行
     engine.register_fn("screen_locked", || -> bool { false });
     engine.register_fn("lock_screen", || {});
+    engine.register_fn("enter_sleep", || {});
     engine.register_fn("shutdown", |_delay: i64| {});
     engine.register_fn("log", |_msg: &str| {});
     engine.register_fn("configure_tts", |_key: &str, _voice: &str| {});

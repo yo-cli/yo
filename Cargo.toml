@@ -1,6 +1,6 @@
 [package]
 name = "yo"
-version = "1.1.17"
+version = "1.1.18"
 edition = "2021"
 authors = ["Your Name <you@example.com>"]
 description = "A multi-functional command-line tool with GitHub SSH key management and SOCKS5 proxy"
@@ -10,9 +10,9 @@ description = "A multi-functional command-line tool with GitHub SSH key manageme
 name = "yo_lib"
 path = "src/lib.rs"
 
-# Binary: Task scheduler with TTS and Web UI (Windows only)
+# Binary: Main entry point (Windows) - supports "yo run auto" syntax
 [[bin]]
-name = "yo-auto"
+name = "yo"
 path = "src/bin/yo_auto.rs"
 
 # Binary: GitHub SSH key management (Linux musl)

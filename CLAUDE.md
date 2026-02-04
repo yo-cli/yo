@@ -43,46 +43,51 @@ cargo fmt
 # Check without building
 cargo check
 
-# Debug build and run
-cargo run -- --version
-cargo run -- run auto
+# Debug build and run specific binary
+cargo run --bin yo-auto -- --version
+cargo run --bin yo-git -- --version
+cargo run --bin yo-auto -- --web
 ```
 
 ## Running the Application
 
+The project builds multiple specialized binaries (not a single binary with subcommands):
+
 ```bash
-# GitHub SSH key setup
-yo init @username/repository
+# yo-git: GitHub SSH key management
+yo-git init @username/repository
+yo-git init @username/repository --https    # HTTPS with token
+yo-git init @username/repository --ssh      # SSH deploy key
 
-# SOCKS5 proxy (automatic / interactive mode)
-yo run s5
-yo run s5 -i
+# yo-s5: SOCKS5 proxy
+yo-s5           # Automatic mode
+yo-s5 -i        # Interactive mode
 
-# Task scheduler (persistent service)
-yo run auto
-
-# Task scheduler with Web UI (default port 9999 / custom port)
-yo run auto --web
-yo run auto --web 8080
+# yo-auto: Task scheduler (persistent service)
+yo-auto                     # Run scheduler without web UI
+yo-auto --web               # With Web UI (default port 9999)
+yo-auto --web 8080          # With Web UI on custom port
+yo-auto test                # Test hourly chime playback
+yo-auto ve                  # Test Volcengine TTS synthesis
 
 # Windows autostart management
-yo run auto --web --autostart           # Install autostart
-yo run auto --web --autostart remove    # Remove autostart
-yo run auto --web --autostart status    # Show status
+yo-auto --autostart              # Install autostart
+yo-auto --autostart remove       # Remove autostart
+yo-auto --autostart status       # Show status
 
-# Template cloning with keyword replacement
-yo run clone
+# yo-ob: OceanBase environment tool (Linux)
+yo-ob prepare               # Prepare system for OceanBase
+yo-ob check                 # Check system configuration
 
-# Test hourly chime / Volcengine TTS
-yo run test
-yo run ve
+# yo-file: File utilities
+yo-file clone               # Template cloning with keyword replacement
 ```
 
 ## Architecture
 
 ### Module Structure
 
-The codebase follows a domain-driven structure with 5 main modules under `src/`:
+The codebase follows a domain-driven structure with 6 main modules under `src/`:
 
 1. **`commands/`** - Command entry points that orchestrate business logic (one file per command)
 2. **`github/`** - GitHub integration: encrypted token storage, Ed25519 key generation, REST API client
@@ -96,11 +101,19 @@ The codebase follows a domain-driven structure with 5 main modules under `src/`:
    - `state/` - Single instance enforcement via PID file
    - `web/` - Axum-based REST API + static file serving for Web UI
    - `ui/` - Vue 3 Composition API frontend (`web_ui.html`)
-5. **`common/`** - Shared utilities (AES-256-CBC encryption with MAC-address-derived key)
+5. **`ob/`** - OceanBase environment configuration: system tuning, sysctl, IPv6 management
+6. **`common/`** - Shared utilities (AES-256-CBC encryption with MAC-address-derived key)
+
+**Binary structure** (`src/bin/`):
+- `yo_auto.rs` - Task scheduler with TTS and Web UI
+- `yo_git.rs` - GitHub SSH key management
+- `yo_s5.rs` - SOCKS5 proxy service
+- `yo_file.rs` - File utilities (template cloning)
+- `yo_ob.rs` - OceanBase environment tool
 
 ### Key Design Patterns
 
-**CLI Dispatch**: Manual argument parsing in `main.rs` (no clap/structopt). Pattern matching on positional args dispatches to command structs. All commands return `Result` with errors displayed in bold red.
+**CLI Dispatch**: Each binary (`src/bin/*.rs`) handles its own argument parsing. `yo_git` and `yo_s5` use manual parsing while others may use clap. All commands return `Result` with errors displayed in bold red.
 
 **Encryption Strategy**:
 - GitHub tokens encrypted with AES-256-CBC
@@ -117,6 +130,7 @@ The codebase follows a domain-driven structure with 5 main modules under `src/`:
   - **Time**: `hour()`, `minute()`, `second()`, `weekday()`, `time_str()`, `date_str()`, `in_time_range(start, end)`, `is_weekend()`, `is_workday()`
   - **Actions**: `speak(text)`, `lock_screen()`, `shutdown(delay_secs)`, `chime(hour)`, `log(msg)`
   - **Screen**: `screen_locked()` - check if screen is currently locked
+  - **State**: `get_counter(name)`, `set_counter(name, value)` - persistent counters for tracking script state
   - **TTS config**: `configure_tts(api_key, voice)`
   - **Environment**: `get_env(name)`, `has_env(name)` - read from GlobalConfig
   - **Calendar**: `generate_script_events(script_name)` - simulate and persist events to `events.json`
