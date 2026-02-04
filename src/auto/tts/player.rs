@@ -10,7 +10,7 @@ use std::path::PathBuf;
 // 嵌入音频文件
 const HOUR_CHIME_AUDIO: &[u8] = include_bytes!("../../../voice/clock/Hour_Chime_from_Clock.mp3");
 
-/// 播放音频文件
+/// 播放音频文件（异步，不阻塞调用线程）
 pub fn play_audio(file_path: &PathBuf) -> Result<(), TtsError> {
     if !file_path.exists() {
         return Err(TtsError::PlayAudioFailed(format!(
@@ -24,21 +24,39 @@ pub fn play_audio(file_path: &PathBuf) -> Result<(), TtsError> {
         format!("  🔊 Playing: {}", file_path.display()).green()
     );
 
-    let file = File::open(file_path)
-        .map_err(|e| TtsError::PlayAudioFailed(format!("Failed to open: {}", e)))?;
+    let path = file_path.clone();
+    std::thread::spawn(move || {
+        let file = match File::open(&path) {
+            Ok(f) => f,
+            Err(e) => {
+                println!("{}", format!("  ✗ Failed to open: {}", e).red());
+                return;
+            }
+        };
 
-    let stream = OutputStreamBuilder::open_default_stream()
-        .map_err(|e| TtsError::PlayAudioFailed(format!("No audio output: {}", e)))?;
+        let stream = match OutputStreamBuilder::open_default_stream() {
+            Ok(s) => s,
+            Err(e) => {
+                println!("{}", format!("  ✗ No audio output: {}", e).red());
+                return;
+            }
+        };
 
-    let sink = Sink::connect_new(stream.mixer());
+        let sink = Sink::connect_new(stream.mixer());
 
-    let decoder = rodio::Decoder::new(BufReader::new(file))
-        .map_err(|e| TtsError::PlayAudioFailed(format!("Failed to decode: {}", e)))?;
+        let decoder = match rodio::Decoder::new(BufReader::new(file)) {
+            Ok(d) => d,
+            Err(e) => {
+                println!("{}", format!("  ✗ Failed to decode: {}", e).red());
+                return;
+            }
+        };
 
-    sink.append(decoder);
-    sink.sleep_until_end();
+        sink.append(decoder);
+        sink.sleep_until_end();
+        println!("{}", "  ✓ Playback completed".green());
+    });
 
-    println!("{}", "  ✓ Playback completed".green());
     Ok(())
 }
 

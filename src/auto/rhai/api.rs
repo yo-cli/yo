@@ -1,9 +1,11 @@
 //! Rhai API 注册
 
 use super::types::GlobalState;
+use crate::auto::calendar;
 use crate::auto::config::GlobalConfig;
 use crate::auto::screen::is_screen_locked;
 use crate::auto::tts::VolcengineTtsClient;
+use crate::auto::weather::QWeatherClient;
 use chrono::{Datelike, Local, NaiveTime, Timelike};
 use colored::Colorize;
 use rhai::{Engine, Scope};
@@ -105,6 +107,32 @@ fn register_time_apis(engine: &mut Engine) {
             (Some(s), Some(e)) => now >= s && now < e,
             _ => false,
         }
+    });
+
+    // weekday_name - 星期几中文名
+    engine.register_fn("weekday_name", || -> String {
+        let wd = Local::now().weekday().num_days_from_monday() + 1;
+        calendar::weekday_name(wd).to_string()
+    });
+
+    // days_until_spring_festival - 距离春节天数
+    engine.register_fn("days_until_spring_festival", || -> i64 {
+        calendar::days_until_spring_festival()
+    });
+
+    // get_today_festival - 今日节日
+    engine.register_fn("get_today_festival", || -> String {
+        calendar::get_today_festival().unwrap_or_default()
+    });
+
+    // get_today_solar_term - 今日节气
+    engine.register_fn("get_today_solar_term", || -> String {
+        calendar::get_today_solar_term().unwrap_or_default()
+    });
+
+    // get_today_special - 今日节日或节气
+    engine.register_fn("get_today_special", || -> String {
+        calendar::get_today_special().unwrap_or_default()
     });
 }
 
@@ -276,8 +304,65 @@ fn register_env_apis(engine: &mut Engine, config: GlobalConfig) {
     });
 
     // has_env - 检查环境变量是否存在
+    let c = config.clone();
     engine.register_fn("has_env", move |name: &str| -> bool {
-        config.get(name).is_some()
+        c.get(name).is_some()
+    });
+
+    // get_weather - 获取天气信息
+    // 返回 Map: #{weather, temp, feels_like, humidity, wind_dir, wind_scale}
+    // 需要在 config.json 中配置:
+    //   - QWEATHER_CREDENTIAL_ID: 凭据ID
+    //   - QWEATHER_PROJECT_ID: 项目ID
+    //   - QWEATHER_API_KEY: 私钥
+    let c = config.clone();
+    engine.register_fn("get_weather", move |location: &str| -> rhai::Map {
+        let mut result = rhai::Map::new();
+
+        let credential_id = match c.get("QWEATHER_CREDENTIAL_ID") {
+            Some(id) => id.clone(),
+            None => {
+                println!("{}", "⚠ 未配置 QWEATHER_CREDENTIAL_ID".yellow());
+                result.insert("error".into(), "未配置 QWEATHER_CREDENTIAL_ID".into());
+                return result;
+            }
+        };
+
+        let project_id = match c.get("QWEATHER_PROJECT_ID") {
+            Some(id) => id.clone(),
+            None => {
+                println!("{}", "⚠ 未配置 QWEATHER_PROJECT_ID".yellow());
+                result.insert("error".into(), "未配置 QWEATHER_PROJECT_ID".into());
+                return result;
+            }
+        };
+
+        let private_key = match c.get("QWEATHER_API_KEY") {
+            Some(key) => key.clone(),
+            None => {
+                println!("{}", "⚠ 未配置 QWEATHER_API_KEY (私钥)".yellow());
+                result.insert("error".into(), "未配置 QWEATHER_API_KEY".into());
+                return result;
+            }
+        };
+
+        let client = QWeatherClient::new(credential_id, project_id, private_key);
+        match client.get_weather(location) {
+            Ok(info) => {
+                result.insert("weather".into(), info.weather.into());
+                result.insert("temp".into(), (info.temp as i64).into());
+                result.insert("feels_like".into(), (info.feels_like as i64).into());
+                result.insert("humidity".into(), (info.humidity as i64).into());
+                result.insert("wind_dir".into(), info.wind_dir.into());
+                result.insert("wind_scale".into(), info.wind_scale.into());
+            }
+            Err(e) => {
+                println!("{}", format!("⚠ 获取天气失败: {}", e).yellow());
+                result.insert("error".into(), e.into());
+            }
+        }
+
+        result
     });
 }
 
@@ -370,6 +455,14 @@ pub fn create_simulation_engine(ctx: Arc<Mutex<SimulationContext>>) -> Engine {
     engine.register_fn("configure_tts", |_key: &str, _voice: &str| {});
     engine.register_fn("get_env", |_name: &str| -> String { String::new() });
     engine.register_fn("has_env", |_name: &str| -> bool { false });
+
+    // 日历和天气 API 模拟
+    engine.register_fn("weekday_name", || -> String { "星期一".to_string() });
+    engine.register_fn("days_until_spring_festival", || -> i64 { 30 });
+    engine.register_fn("get_today_festival", || -> String { String::new() });
+    engine.register_fn("get_today_solar_term", || -> String { String::new() });
+    engine.register_fn("get_today_special", || -> String { String::new() });
+    engine.register_fn("get_weather", |_location: &str| -> rhai::Map { rhai::Map::new() });
 
     engine
 }

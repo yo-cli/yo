@@ -1,6 +1,6 @@
 [package]
 name = "yo"
-version = "1.1.18"
+version = "1.1.27"
 edition = "2021"
 authors = ["Your Name <you@example.com>"]
 description = "A multi-functional command-line tool with GitHub SSH key management and SOCKS5 proxy"
@@ -39,7 +39,7 @@ path = "src/bin/yo_ob.rs"
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 # HTTP client for API requests (use rustls instead of openssl)
-reqwest = { version = "0.13", features = ["blocking", "json", "rustls"], default-features = false }
+reqwest = { version = "0.13", features = ["blocking", "json", "rustls", "gzip"], default-features = false }
 # Web framework
 axum = "0.8"
 tower = "0.5"
@@ -80,9 +80,15 @@ rhai = { version = "1.19", features = ["sync"] }
 clap = { version = "4", features = ["derive"] }
 # Home directory detection
 dirs-next = "2.0"
+# URL encoding
+urlencoding = "2.1"
+# Ed25519 signing for QWeather JWT auth
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+# SSH key parsing
+ssh-key = { version = "0.6", features = ["ed25519"] }
 
 [features]
-default = []
+default = ["audio"]
 audio = ["rodio"]
 
 [target.'cfg(unix)'.dependencies]
