@@ -22,12 +22,35 @@ impl RhaiEngine {
         let mut engine = Engine::new();
         let state = Arc::new(Mutex::new(GlobalState::default()));
 
+        // 程序启动时清除所有持久化的脚本状态
+        // 每次重启都使用脚本中定义的新 state
+        Self::clear_all_states();
+
         // 加载全局配置
         let config = GlobalConfig::load();
         Self::apply_config(&state, &config);
 
         api::register_all(&mut engine, state.clone(), config);
         Self { engine, state }
+    }
+
+    /// 清除所有持久化的脚本状态
+    /// 每次程序重启时调用，确保使用脚本中定义的最新默认值
+    fn clear_all_states() {
+        let state_dir = Self::get_state_dir();
+        if state_dir.exists() {
+            if let Ok(entries) = fs::read_dir(&state_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().map(|e| e == "json").unwrap_or(false) {
+                        if let Err(e) = fs::remove_file(&path) {
+                            println!("{}", format!("  ⚠ Failed to clear state {}: {}", path.display(), e).yellow());
+                        }
+                    }
+                }
+            }
+            println!("{}", "✓ Cleared all persisted script states".cyan());
+        }
     }
 
     /// 应用全局配置到状态
@@ -146,6 +169,7 @@ impl RhaiEngine {
     }
 
     /// 调用函数，支持状态持久化
+    /// 只持久化本次执行中实际改变的值
     fn call_fn_with_state(&self, rule: &Rule, fn_name: &str) -> Result<(), String> {
         // 设置当前脚本上下文（用于 generate_script_events）
         {
@@ -165,38 +189,20 @@ impl RhaiEngine {
 
         // 获取脚本定义的默认 state
         let default_state = scope.get_value::<Dynamic>("state")
-            .and_then(|v| v.try_cast::<Map>());
+            .and_then(|v| v.try_cast::<Map>())
+            .unwrap_or_default();
 
-        // 从 GlobalState 加载已保存的 state
-        let saved_state = {
-            let gs = self.state.lock().unwrap();
-            gs.script_states.get(&rule.name).cloned()
-        };
+        // 从磁盘加载已保存的运行时状态（只包含之前改变过的值）
+        let saved_runtime_state = self.load_state_from_disk(&rule.name).unwrap_or_default();
 
-        // 合并状态：已保存的值覆盖默认值
-        if let Some(default) = default_state {
-            let final_state = if let Some(saved) = saved_state {
-                let mut merged = default.clone();
-                for (k, v) in saved {
-                    merged.insert(k, v);
-                }
-                merged
-            } else {
-                // 首次运行，尝试从磁盘加载
-                if let Some(disk_state) = self.load_state_from_disk(&rule.name) {
-                    let mut merged = default.clone();
-                    for (k, v) in disk_state {
-                        merged.insert(k, v);
-                    }
-                    merged
-                } else {
-                    default
-                }
-            };
-
-            // 更新 scope 中的 state
-            scope.set_value("state", final_state);
+        // 合并：脚本默认值 + 已保存的运行时状态
+        let mut final_state = default_state.clone();
+        for (k, v) in saved_runtime_state {
+            final_state.insert(k, v);
         }
+
+        // 更新 scope 中的 state
+        scope.set_value("state", final_state);
 
         // 调用函数（如果存在）
         let result = self.engine.call_fn::<()>(&mut scope, &rule.ast, fn_name, ());
@@ -211,16 +217,33 @@ impl RhaiEngine {
             }
         }
 
-        // 保存状态
+        // 获取执行后的状态，只保存与默认值不同的部分
         if let Some(state_val) = scope.get_value::<Dynamic>("state") {
-            if let Some(state_map) = state_val.try_cast::<Map>() {
+            if let Some(state_after) = state_val.try_cast::<Map>() {
+                // 只保存与脚本默认值不同的值（运行时改变的状态）
+                let mut runtime_state = Map::new();
+
+                for (k, after_val) in &state_after {
+                    let default_val = default_state.get(k.as_str());
+
+                    // 只有与默认值不同时才保存
+                    let should_save = match default_val {
+                        Some(dv) => !Self::dynamic_equals(&after_val, dv),
+                        None => true, // 新增的 key
+                    };
+
+                    if should_save {
+                        runtime_state.insert(k.clone(), after_val.clone());
+                    }
+                }
+
                 // 保存到 GlobalState
                 {
                     let mut gs = self.state.lock().unwrap();
-                    gs.script_states.insert(rule.name.clone(), state_map.clone());
+                    gs.script_states.insert(rule.name.clone(), runtime_state.clone());
                 }
-                // 持久化到磁盘
-                self.save_state_to_disk(&rule.name, &state_map);
+                // 持久化到磁盘（只保存运行时改变的值）
+                self.save_state_to_disk(&rule.name, &runtime_state);
             }
         }
 
@@ -231,6 +254,23 @@ impl RhaiEngine {
         }
 
         Ok(())
+    }
+
+    /// 比较两个 Dynamic 值是否相等
+    fn dynamic_equals(a: &Dynamic, b: &Dynamic) -> bool {
+        if let (Ok(a_int), Ok(b_int)) = (a.as_int(), b.as_int()) {
+            return a_int == b_int;
+        }
+        if let (Ok(a_float), Ok(b_float)) = (a.as_float(), b.as_float()) {
+            return (a_float - b_float).abs() < f64::EPSILON;
+        }
+        if let (Ok(a_bool), Ok(b_bool)) = (a.as_bool(), b.as_bool()) {
+            return a_bool == b_bool;
+        }
+        if let (Ok(a_str), Ok(b_str)) = (a.clone().into_string(), b.clone().into_string()) {
+            return a_str == b_str;
+        }
+        false
     }
 
     /// 获取状态存储目录
