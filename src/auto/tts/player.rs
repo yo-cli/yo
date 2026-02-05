@@ -1,11 +1,12 @@
 //! 音频播放 - 真实实现 (需要 audio feature)
 
 use super::error::TtsError;
+use crate::auto::rhai::types::get_home_dir;
 use colored::Colorize;
 use rodio::{OutputStreamBuilder, Sink};
 use std::fs::{self, File};
 use std::io::BufReader;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
 use std::sync::OnceLock;
 
@@ -73,7 +74,7 @@ fn play_audio_sync(path: &PathBuf) {
 }
 
 /// 播放音频文件（阻塞等待播放完成，但不阻塞其他线程）
-pub fn play_audio(file_path: &PathBuf) -> Result<(), TtsError> {
+pub fn play_audio(file_path: &Path) -> Result<(), TtsError> {
     if !file_path.exists() {
         return Err(TtsError::PlayAudioFailed(format!(
             "Audio file not found: {}",
@@ -92,7 +93,7 @@ pub fn play_audio(file_path: &PathBuf) -> Result<(), TtsError> {
     let sender = get_audio_sender();
     sender
         .send(AudioRequest {
-            path: file_path.clone(),
+            path: file_path.to_path_buf(),
             done_tx,
         })
         .map_err(|e| TtsError::PlayAudioFailed(format!("Failed to queue audio: {}", e)))?;
@@ -107,11 +108,7 @@ pub fn play_audio(file_path: &PathBuf) -> Result<(), TtsError> {
 
 /// 获取音频目录 (~/.yo/voice/)
 pub fn get_voice_dir() -> Result<PathBuf, TtsError> {
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .map_err(|_| TtsError::PlayAudioFailed("Cannot find home directory".to_string()))?;
-
-    let voice_dir = PathBuf::from(home).join(".yo").join("voice");
+    let voice_dir = PathBuf::from(get_home_dir()).join(".yo").join("voice");
     fs::create_dir_all(&voice_dir)
         .map_err(|e| TtsError::PlayAudioFailed(format!("Failed to create voice dir: {}", e)))?;
 

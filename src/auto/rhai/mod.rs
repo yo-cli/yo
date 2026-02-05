@@ -2,6 +2,7 @@
 
 pub mod api;
 mod default_rules;
+pub mod effects;
 mod index;
 
 pub mod engine;

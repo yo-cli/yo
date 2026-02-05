@@ -1,7 +1,7 @@
 //! Rhai 脚本引擎
 
 use super::{api, default_rules};
-use super::types::{CurrentScript, GlobalState, Rule, Trigger};
+use super::types::{CollectedEvent, CurrentScript, GlobalState, Rule, RunMode, Trigger, get_home_dir, parse_time_to_minutes};
 use crate::auto::config::{keys, GlobalConfig};
 use colored::Colorize;
 use rhai::{Dynamic, Engine, Map, Scope};
@@ -18,17 +18,19 @@ pub struct RhaiEngine {
 }
 
 impl RhaiEngine {
-    pub fn new() -> Self {
+    /// 创建 Rhai 引擎
+    /// - `is_main: true` - 主引擎，清除状态+打印日志
+    /// - `is_main: false` - 独立引擎，静默（用于 TTS 缓存预热）
+    pub fn new(is_main: bool) -> Self {
         let mut engine = Engine::new();
         let state = Arc::new(Mutex::new(GlobalState::default()));
 
-        // 程序启动时清除所有持久化的脚本状态
-        // 每次重启都使用脚本中定义的新 state
-        Self::clear_all_states();
+        if is_main {
+            Self::clear_all_states();
+        }
 
-        // 加载全局配置
         let config = GlobalConfig::load();
-        Self::apply_config(&state, &config);
+        Self::apply_config(&state, &config, is_main);
 
         api::register_all(&mut engine, state.clone(), config);
         Self { engine, state }
@@ -54,23 +56,24 @@ impl RhaiEngine {
     }
 
     /// 应用全局配置到状态
-    fn apply_config(state: &Arc<Mutex<GlobalState>>, config: &GlobalConfig) {
+    fn apply_config(state: &Arc<Mutex<GlobalState>>, config: &GlobalConfig, log_enabled: bool) {
         let mut st = state.lock().unwrap();
         if let Some(api_key) = config.get(keys::TTS_API_KEY) {
             st.tts_api_key = Some(api_key.clone());
-            println!("{}", format!("🔑 TTS_API_KEY loaded from config").cyan());
+            if log_enabled {
+                println!("{}", "🔑 TTS_API_KEY loaded from config".cyan());
+            }
         }
         if let Some(voice) = config.get(keys::TTS_VOICE) {
             st.tts_voice = Some(voice.clone());
-            println!("{}", format!("🔊 TTS_VOICE loaded from config: {}", voice).cyan());
+            if log_enabled {
+                println!("{}", format!("🔊 TTS_VOICE loaded from config: {}", voice).cyan());
+            }
         }
     }
 
     pub fn get_rules_dir() -> PathBuf {
-        let home = std::env::var("USERPROFILE")
-            .or_else(|_| std::env::var("HOME"))
-            .unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(home).join(".yo").join("rules")
+        PathBuf::from(get_home_dir()).join(".yo").join("rules")
     }
 
     pub fn load_rules(&self) -> Result<Vec<Rule>, String> {
@@ -178,6 +181,7 @@ impl RhaiEngine {
                 name: rule.name.clone(),
                 time_range: rule.trigger.time_range.clone(),
                 interval_minutes: rule.trigger.interval_minutes.unwrap_or(1),
+                weekdays: rule.trigger.weekdays.clone(),
                 ast: rule.ast.clone(),
             });
         }
@@ -218,32 +222,36 @@ impl RhaiEngine {
         }
 
         // 获取执行后的状态，只保存与默认值不同的部分
-        if let Some(state_val) = scope.get_value::<Dynamic>("state") {
-            if let Some(state_after) = state_val.try_cast::<Map>() {
-                // 只保存与脚本默认值不同的值（运行时改变的状态）
-                let mut runtime_state = Map::new();
+        // 非真实模式下跳过保存
+        let is_real = self.state.lock().unwrap().exec_ctx.mode.is_real();
+        if is_real {
+            if let Some(state_val) = scope.get_value::<Dynamic>("state") {
+                if let Some(state_after) = state_val.try_cast::<Map>() {
+                    // 只保存与脚本默认值不同的值（运行时改变的状态）
+                    let mut runtime_state = Map::new();
 
-                for (k, after_val) in &state_after {
-                    let default_val = default_state.get(k.as_str());
+                    for (k, after_val) in &state_after {
+                        let default_val = default_state.get(k.as_str());
 
-                    // 只有与默认值不同时才保存
-                    let should_save = match default_val {
-                        Some(dv) => !Self::dynamic_equals(&after_val, dv),
-                        None => true, // 新增的 key
-                    };
+                        // 只有与默认值不同时才保存
+                        let should_save = match default_val {
+                            Some(dv) => !Self::dynamic_equals(after_val, dv),
+                            None => true, // 新增的 key
+                        };
 
-                    if should_save {
-                        runtime_state.insert(k.clone(), after_val.clone());
+                        if should_save {
+                            runtime_state.insert(k.clone(), after_val.clone());
+                        }
                     }
-                }
 
-                // 保存到 GlobalState
-                {
-                    let mut gs = self.state.lock().unwrap();
-                    gs.script_states.insert(rule.name.clone(), runtime_state.clone());
+                    // 保存到 GlobalState
+                    {
+                        let mut gs = self.state.lock().unwrap();
+                        gs.script_states.insert(rule.name.clone(), runtime_state.clone());
+                    }
+                    // 持久化到磁盘（只保存运行时改变的值）
+                    self.save_state_to_disk(&rule.name, &runtime_state);
                 }
-                // 持久化到磁盘（只保存运行时改变的值）
-                self.save_state_to_disk(&rule.name, &runtime_state);
             }
         }
 
@@ -275,10 +283,7 @@ impl RhaiEngine {
 
     /// 获取状态存储目录
     fn get_state_dir() -> PathBuf {
-        let home = std::env::var("USERPROFILE")
-            .or_else(|_| std::env::var("HOME"))
-            .unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(home).join(".yo").join("state")
+        PathBuf::from(get_home_dir()).join(".yo").join("state")
     }
 
     /// 从磁盘加载脚本状态
@@ -361,17 +366,17 @@ impl RhaiEngine {
     fn dynamic_to_json(value: &Dynamic) -> JsonValue {
         if value.is_unit() {
             JsonValue::Null
-        } else if let Some(b) = value.as_bool().ok() {
+        } else if let Ok(b) = value.as_bool() {
             JsonValue::Bool(b)
-        } else if let Some(i) = value.as_int().ok() {
+        } else if let Ok(i) = value.as_int() {
             JsonValue::Number(i.into())
-        } else if let Some(f) = value.as_float().ok() {
+        } else if let Ok(f) = value.as_float() {
             serde_json::Number::from_f64(f)
                 .map(JsonValue::Number)
                 .unwrap_or(JsonValue::Null)
-        } else if let Some(s) = value.clone().into_string().ok() {
+        } else if let Ok(s) = value.clone().into_string() {
             JsonValue::String(s)
-        } else if let Some(arr) = value.clone().into_array().ok() {
+        } else if let Ok(arr) = value.clone().into_array() {
             let vec: Vec<JsonValue> = arr.iter().map(Self::dynamic_to_json).collect();
             JsonValue::Array(vec)
         } else if let Some(map) = value.clone().try_cast::<Map>() {
@@ -385,4 +390,145 @@ impl RhaiEngine {
     pub fn get_state(&self) -> Arc<Mutex<GlobalState>> {
         self.state.clone()
     }
+
+    /// 设置运行模式
+    pub fn set_run_mode(&self, mode: RunMode) {
+        let mut st = self.state.lock().unwrap();
+        st.exec_ctx.mode = mode;
+        st.exec_ctx.collected_events.clear();
+    }
+
+    /// 重置为真实模式
+    pub fn reset_run_mode(&self) {
+        let mut st = self.state.lock().unwrap();
+        st.exec_ctx.mode = RunMode::Real;
+    }
+
+    /// TTS 缓存预构建
+    /// 提前执行脚本生成 TTS 缓存，speak 只生成缓存不播放
+    pub fn prebuild_tts(&self, rule: &Rule, sim_hour: u32, sim_minute: u32) -> Result<(), String> {
+        // 进入 CacheTts 模式
+        self.set_run_mode(RunMode::CacheTts { hour: sim_hour, minute: sim_minute });
+
+        // 模拟 on_mount（脚本首次激活时可能有 speak）
+        let mount_result = self.call_on_mount(rule);
+        if let Err(ref e) = mount_result {
+            if !e.contains("not found") {
+                println!("{}", format!("  ⚠ [{}] on_mount error: {}", rule.name, e).yellow());
+            }
+        }
+
+        // 模拟 on_tick
+        let tick_result = self.call_on_tick(rule);
+        if let Err(ref e) = tick_result {
+            if !e.contains("not found") {
+                println!("{}", format!("  ⚠ [{}] on_tick error: {}", rule.name, e).yellow());
+            }
+        }
+
+        // 模拟 on_unlock（用户可能会解锁）
+        let unlock_result = self.call_on_unlock(rule);
+        if let Err(ref e) = unlock_result {
+            if !e.contains("not found") {
+                println!("{}", format!("  ⚠ [{}] on_unlock error: {}", rule.name, e).yellow());
+            }
+        }
+
+        // 重置为真实模式
+        self.reset_run_mode();
+
+        println!("{}", format!("  ✓ [{}] TTS cache ready", rule.name).green());
+        Ok(())
+    }
+}
+
+/// 生成脚本事件
+/// 使用独立 Engine 遍历时间范围，收集所有 speak/chime 事件
+pub fn generate_events(
+    ast: &rhai::AST,
+    time_range: Option<(String, String)>,
+    interval_minutes: u32,
+    config: GlobalConfig,
+) -> Vec<CollectedEvent> {
+    // 确保 interval 至少为 1，避免无限循环
+    let interval = if interval_minutes == 0 { 1 } else { interval_minutes };
+
+    // 创建独立的 GlobalState
+    let state = Arc::new(Mutex::new(GlobalState::default()));
+
+    // 加载 TTS 配置（确保脚本条件判断行为一致）
+    {
+        let mut st = state.lock().unwrap();
+        if let Some(api_key) = config.get(keys::TTS_API_KEY) {
+            st.tts_api_key = Some(api_key.clone());
+        }
+        if let Some(voice) = config.get(keys::TTS_VOICE) {
+            st.tts_voice = Some(voice.clone());
+        }
+    }
+
+    // 创建 Engine 并注册 API
+    let mut engine = Engine::new();
+    api::register_all(&mut engine, state.clone(), config);
+
+    // 确定时间范围
+    let (start_mins, end_mins) = if let Some((ref start, ref end)) = time_range {
+        (parse_time_to_minutes(start), parse_time_to_minutes(end))
+    } else {
+        (0, 24 * 60)
+    };
+
+    // 处理边界情况：start == end 视为无效范围
+    if start_mins == end_mins {
+        return Vec::new();
+    }
+
+    // 处理跨午夜：start > end 表示跨午夜
+    let ranges: Vec<(i64, i64)> = if start_mins > end_mins {
+        vec![(start_mins, 24 * 60), (0, end_mins)]
+    } else {
+        vec![(start_mins, end_mins)]
+    };
+
+    // 首次调用 on_mount 和 on_unlock（使用起始时间）
+    let first_hour = (ranges[0].0 / 60) as u32;
+    let first_minute = (ranges[0].0 % 60) as u32;
+    {
+        let mut st = state.lock().unwrap();
+        st.exec_ctx.mode = RunMode::GenerateEvents { hour: first_hour, minute: first_minute };
+    }
+    {
+        let mut scope = Scope::new();
+        let _ = engine.run_ast_with_scope(&mut scope, ast);
+        let _ = engine.call_fn::<()>(&mut scope, ast, "on_mount", ());
+        let _ = engine.call_fn::<()>(&mut scope, ast, "on_unlock", ());
+    }
+
+    // 遍历时间范围
+    for (range_start, range_end) in ranges {
+        let mut current = range_start;
+        while current < range_end {
+            let hour = (current / 60) as u32;
+            let minute = (current % 60) as u32;
+
+            // 设置为 GenerateEvents 模式
+            {
+                let mut st = state.lock().unwrap();
+                st.exec_ctx.mode = RunMode::GenerateEvents { hour, minute };
+            }
+
+            // 运行脚本获取变量
+            let mut scope = Scope::new();
+            let _ = engine.run_ast_with_scope(&mut scope, ast);
+
+            // 调用 on_tick
+            let _ = engine.call_fn::<()>(&mut scope, ast, "on_tick", ());
+
+            current += interval as i64;
+        }
+    }
+
+    // 返回收集的事件
+    let events = state.lock().unwrap().exec_ctx.collected_events.clone();
+    events
 }

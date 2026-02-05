@@ -2,7 +2,7 @@
 
 use colored::Colorize;
 use std::fs;
-use std::path::PathBuf;
+use std::path::Path;
 
 const EXAMPLE_RULE: &str = r#"// 示例规则 - 可以复制此文件创建新规则
 //
@@ -86,7 +86,7 @@ fn on_unlock() {
 "#;
 
 /// 创建默认规则文件
-pub fn create(rules_dir: &PathBuf) -> Result<(), String> {
+pub fn create(rules_dir: &Path) -> Result<(), String> {
     fs::write(rules_dir.join("example.rhai"), EXAMPLE_RULE)
         .map_err(|e| e.to_string())?;
 

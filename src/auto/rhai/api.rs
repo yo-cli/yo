@@ -1,50 +1,17 @@
 //! Rhai API 注册
 
-use super::types::GlobalState;
-use crate::auto::calendar;
+use super::effects::SideEffectExecutor;
+use super::engine::generate_events;
+use super::types::{calculate_end_time, get_home_dir, CalendarEvent, GlobalState};
 use crate::auto::config::GlobalConfig;
-use crate::auto::screen::is_screen_locked;
-use crate::auto::tts::VolcengineTtsClient;
 use crate::auto::weather::QWeatherClient;
-use chrono::{Datelike, Local, NaiveTime, Timelike};
 use colored::Colorize;
-use rhai::{Engine, Scope};
-use std::process::Command;
+use rhai::Engine;
 use std::sync::{Arc, Mutex};
-
-/// 模拟收集的事件
-#[derive(Debug, Clone)]
-pub struct SimulatedEvent {
-    pub time: String,
-    pub text: String,
-}
-
-/// 模拟上下文
-#[derive(Default)]
-pub struct SimulationContext {
-    pub hour: i64,
-    pub minute: i64,
-    pub events: Vec<SimulatedEvent>,
-}
-
-/// 日历事件（用于生成）
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct CalendarEvent {
-    pub id: String,
-    pub name: String,
-    pub start_time: String,
-    pub end_time: String,
-    pub color: String,
-    pub weekdays: Option<Vec<u32>>,
-    pub enabled: bool,
-}
 
 /// 获取事件存储路径
 fn get_events_file() -> std::path::PathBuf {
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .unwrap_or_else(|_| ".".to_string());
-    std::path::PathBuf::from(home).join(".yo").join("events.json")
+    std::path::PathBuf::from(get_home_dir()).join(".yo").join("events.json")
 }
 
 /// 生成确定性事件 ID
@@ -53,92 +20,92 @@ fn generate_event_id(script_name: &str, time: &str, text: &str) -> String {
     for c in text.chars() {
         hash = hash.wrapping_mul(31).wrapping_add(c as i32);
     }
-    format!("{}_{}_{}",
+    format!("{}_{}_{:x}",
         script_name,
         time.replace(':', ""),
-        format!("{:x}", hash.unsigned_abs())
+        hash.unsigned_abs()
     )
-}
-
-/// 计算结束时间
-fn calculate_end_time(start: &str, duration_mins: u32) -> String {
-    let parts: Vec<&str> = start.split(':').collect();
-    if parts.len() >= 2 {
-        let h: u32 = parts[0].parse().unwrap_or(0);
-        let m: u32 = parts[1].parse().unwrap_or(0);
-        let total = h * 60 + m + duration_mins;
-        let end_h = (total / 60) % 24;
-        let end_m = total % 60;
-        format!("{:02}:{:02}", end_h, end_m)
-    } else {
-        start.to_string()
-    }
 }
 
 /// 注册所有 API 到引擎
 pub fn register_all(engine: &mut Engine, state: Arc<Mutex<GlobalState>>, config: GlobalConfig) {
-    register_time_apis(engine);
-    register_action_apis(engine, state);
+    let executor = Arc::new(SideEffectExecutor::new(state.clone()));
+    register_time_apis(engine, executor.clone());
+    register_action_apis(engine, state, executor, config.clone());
     register_env_apis(engine, config);
 }
 
-fn register_time_apis(engine: &mut Engine) {
-    engine.register_fn("hour", || Local::now().hour() as i64);
-    engine.register_fn("minute", || Local::now().minute() as i64);
-    engine.register_fn("second", || Local::now().second() as i64);
-    engine.register_fn("weekday", || {
-        Local::now().weekday().num_days_from_monday() as i64 + 1
-    });
-    engine.register_fn("is_weekend", || {
-        Local::now().weekday().num_days_from_monday() >= 5
-    });
-    engine.register_fn("is_workday", || {
-        Local::now().weekday().num_days_from_monday() < 5
-    });
-    engine.register_fn("time_str", || Local::now().format("%H:%M").to_string());
-    engine.register_fn("date_str", || Local::now().format("%Y-%m-%d").to_string());
+fn register_time_apis(engine: &mut Engine, executor: Arc<SideEffectExecutor>) {
+    // 时间相关 API - 通过 executor 支持运行模式
+    let e = executor.clone();
+    engine.register_fn("hour", move || e.hour());
 
-    engine.register_fn("in_time_range", |start: &str, end: &str| -> bool {
-        let now = Local::now().time();
-        let start_time = NaiveTime::parse_from_str(start, "%H:%M").ok();
-        let end_time = NaiveTime::parse_from_str(end, "%H:%M").ok();
-        match (start_time, end_time) {
-            (Some(s), Some(e)) if s > e => now >= s || now < e,
-            (Some(s), Some(e)) => now >= s && now < e,
-            _ => false,
-        }
+    let e = executor.clone();
+    engine.register_fn("minute", move || e.minute());
+
+    let e = executor.clone();
+    engine.register_fn("second", move || e.second());
+
+    let e = executor.clone();
+    engine.register_fn("weekday", move || e.weekday());
+
+    let e = executor.clone();
+    engine.register_fn("is_weekend", move || e.is_weekend());
+
+    let e = executor.clone();
+    engine.register_fn("is_workday", move || e.is_workday());
+
+    let e = executor.clone();
+    engine.register_fn("time_str", move || e.time_str());
+
+    let e = executor.clone();
+    engine.register_fn("date_str", move || e.date_str());
+
+    let e = executor.clone();
+    engine.register_fn("in_time_range", move |start: &str, end: &str| -> bool {
+        e.in_time_range(start, end)
     });
 
     // weekday_name - 星期几中文名
-    engine.register_fn("weekday_name", || -> String {
-        let wd = Local::now().weekday().num_days_from_monday() + 1;
-        calendar::weekday_name(wd).to_string()
+    let e = executor.clone();
+    engine.register_fn("weekday_name", move || -> String {
+        e.weekday_name()
     });
 
     // days_until_spring_festival - 距离春节天数
-    engine.register_fn("days_until_spring_festival", || -> i64 {
-        calendar::days_until_spring_festival()
+    let e = executor.clone();
+    engine.register_fn("days_until_spring_festival", move || -> i64 {
+        e.days_until_spring_festival()
     });
 
     // get_today_festival - 今日节日
-    engine.register_fn("get_today_festival", || -> String {
-        calendar::get_today_festival().unwrap_or_default()
+    let e = executor.clone();
+    engine.register_fn("get_today_festival", move || -> String {
+        e.get_today_festival()
     });
 
     // get_today_solar_term - 今日节气
-    engine.register_fn("get_today_solar_term", || -> String {
-        calendar::get_today_solar_term().unwrap_or_default()
+    let e = executor.clone();
+    engine.register_fn("get_today_solar_term", move || -> String {
+        e.get_today_solar_term()
     });
 
     // get_today_special - 今日节日或节气
-    engine.register_fn("get_today_special", || -> String {
-        calendar::get_today_special().unwrap_or_default()
+    let e = executor.clone();
+    engine.register_fn("get_today_special", move || -> String {
+        e.get_today_special()
     });
 }
 
-fn register_action_apis(engine: &mut Engine, state: Arc<Mutex<GlobalState>>) {
+fn register_action_apis(
+    engine: &mut Engine,
+    state: Arc<Mutex<GlobalState>>,
+    executor: Arc<SideEffectExecutor>,
+    config: GlobalConfig,
+) {
     // generate_script_events - 生成脚本的日历事件
     let s = state.clone();
+    let cfg = config.clone();
     engine.register_fn("generate_script_events", move |script_name: &str| {
         let current = {
             let gs = s.lock().unwrap();
@@ -147,19 +114,24 @@ fn register_action_apis(engine: &mut Engine, state: Arc<Mutex<GlobalState>>) {
 
         if let Some(script) = current {
             // 使用传入的脚本名（用于 ID 生成）
-            let name = if script_name.is_empty() { &script.name } else { script_name };
+            let name = if script_name.is_empty() { script.name.clone() } else { script_name.to_string() };
 
-            // 运行模拟
-            let simulated = simulate_script(&script.ast, script.time_range, script.interval_minutes);
+            // 使用统一的事件生成机制
+            let events = generate_events(
+                &script.ast,
+                script.time_range.clone(),
+                script.interval_minutes,
+                cfg.clone(),
+            );
 
-            if simulated.is_empty() {
+            if events.is_empty() {
                 println!("{}", format!("📅 [{}] No events to generate", name).yellow());
                 return;
             }
 
             // 加载现有事件
             let events_file = get_events_file();
-            let mut events: Vec<CalendarEvent> = if events_file.exists() {
+            let mut calendar_events: Vec<CalendarEvent> = if events_file.exists() {
                 std::fs::read_to_string(&events_file)
                     .ok()
                     .and_then(|c| serde_json::from_str(&c).ok())
@@ -168,16 +140,19 @@ fn register_action_apis(engine: &mut Engine, state: Arc<Mutex<GlobalState>>) {
                 Vec::new()
             };
 
-            let existing_ids: std::collections::HashSet<String> = events.iter().map(|e| e.id.clone()).collect();
+            let existing_ids: std::collections::HashSet<String> = calendar_events.iter().map(|e| e.id.clone()).collect();
 
             // 预定义颜色
             let colors = ["#4CAF50", "#2196F3", "#FF9800", "#9C27B0", "#F44336", "#00BCD4", "#795548", "#607D8B"];
-            let color = colors[events.len() % colors.len()];
+            let color = colors[calendar_events.len() % colors.len()];
+
+            // 获取脚本的星期限制
+            let script_weekdays = script.weekdays.clone();
 
             let mut created = 0;
-            for evt in simulated {
+            for evt in events {
                 // 生成确定性 ID
-                let id = generate_event_id(name, &evt.time, &evt.text);
+                let id = generate_event_id(&name, &evt.time, &evt.text);
 
                 // 幂等检查
                 if existing_ids.contains(&id) {
@@ -187,13 +162,13 @@ fn register_action_apis(engine: &mut Engine, state: Arc<Mutex<GlobalState>>) {
                 // 计算结束时间
                 let end_time = calculate_end_time(&evt.time, 5);
 
-                events.push(CalendarEvent {
+                calendar_events.push(CalendarEvent {
                     id,
                     name: evt.text,
                     start_time: evt.time,
                     end_time,
                     color: color.to_string(),
-                    weekdays: None,
+                    weekdays: script_weekdays.clone(),
                     enabled: true,
                 });
                 created += 1;
@@ -201,7 +176,7 @@ fn register_action_apis(engine: &mut Engine, state: Arc<Mutex<GlobalState>>) {
 
             // 保存
             if created > 0 {
-                if let Ok(content) = serde_json::to_string_pretty(&events) {
+                if let Ok(content) = serde_json::to_string_pretty(&calendar_events) {
                     let _ = std::fs::write(&events_file, content);
                 }
                 println!("{}", format!("📅 [{}] Generated {} events", name, created).green());
@@ -213,103 +188,64 @@ fn register_action_apis(engine: &mut Engine, state: Arc<Mutex<GlobalState>>) {
         }
     });
 
-    // speak(text) - 默认停顿 300ms
-    let s = state.clone();
+    // speak(text) - 通过 executor 支持运行模式
+    let e = executor.clone();
     engine.register_fn("speak", move |text: &str| {
-        let st = s.lock().unwrap();
-        if let (Some(key), Some(voice)) = (&st.tts_api_key, &st.tts_voice) {
-            println!("{}", format!("🔊 Speaking: \"{}\"", text).blue());
-            let client = VolcengineTtsClient::new(key.clone());
-            if let Err(e) = client.synthesize_and_play(text, voice) {
-                println!("{}", format!("⚠ TTS failed: {}", e).yellow());
-            }
-            std::thread::sleep(std::time::Duration::from_millis(300));
-        } else {
-            println!("{}", "⚠ TTS not configured".yellow());
-        }
+        e.speak(text);
     });
 
     // speak(text, pause_ms) - 自定义停顿时间
-    let s = state.clone();
+    let e = executor.clone();
     engine.register_fn("speak", move |text: &str, pause_ms: i64| {
-        let st = s.lock().unwrap();
-        if let (Some(key), Some(voice)) = (&st.tts_api_key, &st.tts_voice) {
-            println!("{}", format!("🔊 Speaking: \"{}\"", text).blue());
-            let client = VolcengineTtsClient::new(key.clone());
-            if let Err(e) = client.synthesize_and_play(text, voice) {
-                println!("{}", format!("⚠ TTS failed: {}", e).yellow());
-            }
-            if pause_ms > 0 {
-                std::thread::sleep(std::time::Duration::from_millis(pause_ms as u64));
-            }
-        } else {
-            println!("{}", "⚠ TTS not configured".yellow());
-        }
+        e.speak_with_pause(text, pause_ms);
     });
 
-    // screen_locked - 检查屏幕是否已锁定
-    engine.register_fn("screen_locked", || -> bool {
-        is_screen_locked()
+    // screen_locked - 检查屏幕是否已锁定（非真实模式返回 false）
+    let e = executor.clone();
+    engine.register_fn("screen_locked", move || -> bool {
+        e.screen_locked()
     });
 
-    // lock_screen
-    engine.register_fn("lock_screen", || {
-        println!("{}", "🔒 Locking screen...".cyan());
-        #[cfg(target_os = "windows")]
-        { let _ = Command::new("rundll32.exe").args(["user32.dll,LockWorkStation"]).status(); }
-        #[cfg(target_os = "linux")]
-        { let _ = Command::new("loginctl").arg("lock-session").status(); }
-        #[cfg(target_os = "macos")]
-        { let _ = Command::new("pmset").arg("displaysleepnow").status(); }
+    // lock_screen - 通过 executor 支持运行模式
+    let e = executor.clone();
+    engine.register_fn("lock_screen", move || {
+        e.lock_screen();
     });
 
-    // enter_sleep - 进入睡眠模式
-    engine.register_fn("enter_sleep", || {
-        println!("{}", "😴 Entering sleep mode...".cyan());
-        #[cfg(target_os = "windows")]
-        { let _ = Command::new("rundll32.exe").args(["powrprof.dll,SetSuspendState", "0,1,0"]).status(); }
-        #[cfg(target_os = "linux")]
-        { let _ = Command::new("systemctl").arg("suspend").status(); }
-        #[cfg(target_os = "macos")]
-        { let _ = Command::new("pmset").arg("sleepnow").status(); }
+    // enter_sleep - 通过 executor 支持运行模式
+    let e = executor.clone();
+    engine.register_fn("enter_sleep", move || {
+        e.enter_sleep();
     });
 
-    // shutdown
-    engine.register_fn("shutdown", |delay: i64| {
-        println!("{}", format!("⚠️ Shutdown in {} seconds", delay).red().bold());
-        #[cfg(target_os = "windows")]
-        { let _ = Command::new("shutdown").args(["/s", "/t", &delay.to_string()]).spawn(); }
-        #[cfg(target_os = "linux")]
-        { let _ = Command::new("shutdown").args(["-h", &format!("+{}", delay / 60)]).spawn(); }
-        #[cfg(target_os = "macos")]
-        { let _ = Command::new("sudo").args(["shutdown", "-h", &format!("+{}", delay / 60)]).spawn(); }
+    // shutdown - 通过 executor 支持运行模式
+    let e = executor.clone();
+    engine.register_fn("shutdown", move |delay: i64| {
+        e.shutdown(delay);
     });
 
-    // chime
-    let s = state.clone();
+    // chime - 通过 executor 支持运行模式
+    let e = executor.clone();
     engine.register_fn("chime", move |hour: i64| {
-        let st = s.lock().unwrap();
-        if let Some(key) = &st.tts_api_key {
-            println!("{}", format!("🕐 Chime: {} o'clock", hour).cyan());
-            let client = VolcengineTtsClient::new(key.clone());
-            if let Err(e) = client.hourly_chime(hour as u32) {
-                println!("{}", format!("⚠ Chime failed: {}", e).yellow());
-            }
-        }
+        e.chime(hour);
     });
 
-    // log
-    engine.register_fn("log", |msg: &str| {
-        println!("{}", format!("📝 {}", msg).white());
+    // log - 通过 executor 支持运行模式
+    let e = executor.clone();
+    engine.register_fn("log", move |msg: &str| {
+        e.log(msg);
     });
 
     // configure_tts
     let s = state;
     engine.register_fn("configure_tts", move |api_key: &str, voice: &str| {
         let mut st = s.lock().unwrap();
+        let is_real = st.exec_ctx.mode.is_real();
         st.tts_api_key = Some(api_key.to_string());
         st.tts_voice = Some(voice.to_string());
-        println!("{}", format!("🔊 TTS configured: voice={}", voice).cyan());
+        if is_real {
+            println!("{}", format!("🔊 TTS configured: voice={}", voice).cyan());
+        }
     });
 }
 
@@ -329,11 +265,6 @@ fn register_env_apis(engine: &mut Engine, config: GlobalConfig) {
     });
 
     // get_weather - 获取天气信息
-    // 返回 Map: #{weather, temp, feels_like, humidity, wind_dir, wind_scale}
-    // 需要在 config.json 中配置:
-    //   - QWEATHER_CREDENTIAL_ID: 凭据ID
-    //   - QWEATHER_PROJECT_ID: 项目ID
-    //   - QWEATHER_API_KEY: 私钥
     let c = config.clone();
     engine.register_fn("get_weather", move |location: &str| -> rhai::Map {
         let mut result = rhai::Map::new();
@@ -383,177 +314,4 @@ fn register_env_apis(engine: &mut Engine, config: GlobalConfig) {
 
         result
     });
-}
-
-/// 创建模拟引擎，用于收集脚本会触发的事件
-pub fn create_simulation_engine(ctx: Arc<Mutex<SimulationContext>>) -> Engine {
-    let mut engine = Engine::new();
-
-    // 模拟时间 API
-    let c = ctx.clone();
-    engine.register_fn("hour", move || -> i64 {
-        c.lock().unwrap().hour
-    });
-
-    let c = ctx.clone();
-    engine.register_fn("minute", move || -> i64 {
-        c.lock().unwrap().minute
-    });
-
-    engine.register_fn("second", || -> i64 { 0 });
-
-    engine.register_fn("weekday", || -> i64 {
-        Local::now().weekday().num_days_from_monday() as i64 + 1
-    });
-
-    engine.register_fn("is_weekend", || -> bool {
-        Local::now().weekday().num_days_from_monday() >= 5
-    });
-
-    engine.register_fn("is_workday", || -> bool {
-        Local::now().weekday().num_days_from_monday() < 5
-    });
-
-    let c = ctx.clone();
-    engine.register_fn("time_str", move || -> String {
-        let ctx = c.lock().unwrap();
-        format!("{:02}:{:02}", ctx.hour, ctx.minute)
-    });
-
-    engine.register_fn("date_str", || -> String {
-        Local::now().format("%Y-%m-%d").to_string()
-    });
-
-    let c = ctx.clone();
-    engine.register_fn("in_time_range", move |start: &str, end: &str| -> bool {
-        let ctx = c.lock().unwrap();
-        let now_mins = ctx.hour * 60 + ctx.minute;
-        let parse = |s: &str| -> Option<i64> {
-            let parts: Vec<&str> = s.split(':').collect();
-            if parts.len() >= 2 {
-                Some(parts[0].parse::<i64>().ok()? * 60 + parts[1].parse::<i64>().ok()?)
-            } else {
-                None
-            }
-        };
-        match (parse(start), parse(end)) {
-            (Some(s), Some(e)) if s > e => now_mins >= s || now_mins < e,
-            (Some(s), Some(e)) => now_mins >= s && now_mins < e,
-            _ => false,
-        }
-    });
-
-    // 模拟 speak - 收集事件
-    let c = ctx.clone();
-    engine.register_fn("speak", move |text: &str| {
-        let mut ctx = c.lock().unwrap();
-        let time = format!("{:02}:{:02}", ctx.hour, ctx.minute);
-        ctx.events.push(SimulatedEvent {
-            time,
-            text: text.to_string(),
-        });
-    });
-
-    // 模拟 speak(text, pause_ms) - 收集事件（忽略 pause_ms）
-    let c = ctx.clone();
-    engine.register_fn("speak", move |text: &str, _pause_ms: i64| {
-        let mut ctx = c.lock().unwrap();
-        let time = format!("{:02}:{:02}", ctx.hour, ctx.minute);
-        ctx.events.push(SimulatedEvent {
-            time,
-            text: text.to_string(),
-        });
-    });
-
-    // 模拟 chime - 收集事件
-    let c = ctx.clone();
-    engine.register_fn("chime", move |hour: i64| {
-        let mut ctx = c.lock().unwrap();
-        let time = format!("{:02}:00", hour);
-        ctx.events.push(SimulatedEvent {
-            time,
-            text: format!("{}点报时", hour),
-        });
-    });
-
-    // 空操作 - 模拟时不执行
-    engine.register_fn("screen_locked", || -> bool { false });
-    engine.register_fn("lock_screen", || {});
-    engine.register_fn("enter_sleep", || {});
-    engine.register_fn("shutdown", |_delay: i64| {});
-    engine.register_fn("log", |_msg: &str| {});
-    engine.register_fn("configure_tts", |_key: &str, _voice: &str| {});
-    engine.register_fn("get_env", |_name: &str| -> String { String::new() });
-    engine.register_fn("has_env", |_name: &str| -> bool { false });
-
-    // 日历和天气 API 模拟
-    engine.register_fn("weekday_name", || -> String { "星期一".to_string() });
-    engine.register_fn("days_until_spring_festival", || -> i64 { 30 });
-    engine.register_fn("get_today_festival", || -> String { String::new() });
-    engine.register_fn("get_today_solar_term", || -> String { String::new() });
-    engine.register_fn("get_today_special", || -> String { String::new() });
-    engine.register_fn("get_weather", |_location: &str| -> rhai::Map { rhai::Map::new() });
-
-    engine
-}
-
-/// 模拟执行脚本并收集事件
-pub fn simulate_script(
-    ast: &rhai::AST,
-    time_range: Option<(String, String)>,
-    interval_minutes: u32,
-) -> Vec<SimulatedEvent> {
-    let ctx = Arc::new(Mutex::new(SimulationContext::default()));
-    let engine = create_simulation_engine(ctx.clone());
-
-    // 确定时间范围
-    let (start_mins, end_mins) = if let Some((start, end)) = time_range {
-        let parse = |s: &str| -> i64 {
-            let parts: Vec<&str> = s.split(':').collect();
-            if parts.len() >= 2 {
-                parts[0].parse::<i64>().unwrap_or(0) * 60 + parts[1].parse::<i64>().unwrap_or(0)
-            } else {
-                0
-            }
-        };
-        (parse(&start), parse(&end))
-    } else {
-        (0, 24 * 60)
-    };
-
-    // 处理跨午夜
-    let ranges: Vec<(i64, i64)> = if end_mins <= start_mins {
-        vec![(start_mins, 24 * 60), (0, end_mins)]
-    } else {
-        vec![(start_mins, end_mins)]
-    };
-
-    // 遍历时间范围
-    for (range_start, range_end) in ranges {
-        let mut current = range_start;
-        while current < range_end {
-            let hour = current / 60;
-            let minute = current % 60;
-
-            // 设置模拟时间
-            {
-                let mut c = ctx.lock().unwrap();
-                c.hour = hour;
-                c.minute = minute;
-            }
-
-            // 运行脚本获取变量
-            let mut scope = Scope::new();
-            let _ = engine.run_ast_with_scope(&mut scope, ast);
-
-            // 调用 on_tick
-            let _ = engine.call_fn::<()>(&mut scope, ast, "on_tick", ());
-
-            current += interval_minutes as i64;
-        }
-    }
-
-    // 返回收集的事件
-    let c = ctx.lock().unwrap();
-    c.events.clone()
 }

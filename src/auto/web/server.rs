@@ -2,8 +2,8 @@
 
 use super::types::WebState;
 use crate::auto::config::GlobalConfig;
-use crate::auto::rhai::api::simulate_script;
-use crate::auto::rhai::engine::RhaiEngine;
+use crate::auto::rhai::engine::{generate_events, RhaiEngine};
+use crate::auto::rhai::types::{get_home_dir, CalendarEvent};
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -36,8 +36,6 @@ pub struct RuleInfo {
 pub struct StatusResponse {
     pub current_time: String,
     pub rules_count: usize,
-    pub paused: bool,
-    pub pause_remaining: Option<i64>,
 }
 
 /// 规则列表响应
@@ -138,24 +136,6 @@ pub struct RenameScriptRequest {
     pub new_name: String,
 }
 
-/// 暂停请求
-#[derive(Debug, Deserialize)]
-pub struct PauseRequest {
-    pub minutes: u32,
-}
-
-/// 日历事件（独立存储，与脚本分离）
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CalendarEvent {
-    pub id: String,
-    pub name: String,
-    pub start_time: String,  // "HH:MM"
-    pub end_time: String,    // "HH:MM"
-    pub color: String,
-    pub weekdays: Option<Vec<u32>>,  // 1-7, None 表示每天
-    pub enabled: bool,
-}
-
 /// 日程响应
 #[derive(Debug, Serialize)]
 pub struct ScheduleResponse {
@@ -219,8 +199,6 @@ pub async fn run_web_server(state: Arc<WebState>, port: u16) {
         .route("/api/script/{name}/simulate", axum::routing::post(simulate_script_handler))
         .route("/api/config", get(get_config))
         .route("/api/config/env", axum::routing::post(set_env).delete(delete_env))
-        .route("/api/pause", axum::routing::post(pause_scheduler))
-        .route("/api/resume", axum::routing::post(resume_scheduler))
         .with_state(state);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
@@ -247,14 +225,10 @@ async fn serve_vue() -> impl IntoResponse {
 async fn get_status(State(state): State<Arc<WebState>>) -> Json<StatusResponse> {
     let scheduler = state.scheduler.lock().unwrap();
     let rules_count = scheduler.rules_count();
-    let pause_remaining = scheduler.pause_remaining_secs();
-    let paused = pause_remaining.map(|s| s > 0).unwrap_or(false);
 
     Json(StatusResponse {
         current_time: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
         rules_count,
-        paused,
-        pause_remaining,
     })
 }
 
@@ -281,10 +255,7 @@ async fn get_rules(State(state): State<Arc<WebState>>) -> Json<RulesResponse> {
 
 /// 获取事件存储路径
 fn get_events_file() -> std::path::PathBuf {
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .unwrap_or_else(|_| ".".to_string());
-    std::path::PathBuf::from(home).join(".yo").join("events.json")
+    std::path::PathBuf::from(get_home_dir()).join(".yo").join("events.json")
 }
 
 /// 加载所有事件
@@ -460,9 +431,12 @@ async fn simulate_script_handler(
     let rule = rule.unwrap();
     let interval = rule.trigger.interval_minutes.unwrap_or(1);
     let time_range = rule.trigger.time_range.clone();
+    let ast = rule.ast.clone();
+    drop(scheduler); // 释放锁
 
-    // 运行模拟
-    let simulated = simulate_script(&rule.ast, time_range, interval);
+    // 加载配置并运行模拟
+    let config = GlobalConfig::load();
+    let simulated = generate_events(&ast, time_range, interval, config);
 
     // 转换为响应格式
     let events: Vec<SimulatedEventResponse> = simulated
@@ -534,39 +508,10 @@ async fn reload_rules(State(state): State<Arc<WebState>>) -> Json<StatusResponse
     let mut scheduler = state.scheduler.lock().unwrap();
     let _ = scheduler.reload();
     let rules_count = scheduler.rules_count();
-    let pause_remaining = scheduler.pause_remaining_secs();
-    let paused = pause_remaining.map(|s| s > 0).unwrap_or(false);
 
     Json(StatusResponse {
         current_time: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
         rules_count,
-        paused,
-        pause_remaining,
-    })
-}
-
-/// 暂停调度器
-async fn pause_scheduler(
-    State(state): State<Arc<WebState>>,
-    Json(payload): Json<PauseRequest>,
-) -> Json<ResultResponse> {
-    let mut scheduler = state.scheduler.lock().unwrap();
-    scheduler.pause(payload.minutes);
-    Json(ResultResponse {
-        success: true,
-        message: format!("Paused for {} minutes", payload.minutes),
-    })
-}
-
-/// 恢复调度器
-async fn resume_scheduler(
-    State(state): State<Arc<WebState>>,
-) -> Json<ResultResponse> {
-    let mut scheduler = state.scheduler.lock().unwrap();
-    scheduler.resume();
-    Json(ResultResponse {
-        success: true,
-        message: "Resumed".to_string(),
     })
 }
 

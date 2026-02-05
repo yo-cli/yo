@@ -3,6 +3,7 @@
 //! 类似 GitHub 环境变量的全局配置系统
 //! 配置存储在 ~/.yo/config.json
 
+use crate::auto::rhai::types::get_home_dir;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -19,10 +20,7 @@ pub struct GlobalConfig {
 impl GlobalConfig {
     /// 获取配置文件路径
     pub fn config_path() -> PathBuf {
-        let home = std::env::var("USERPROFILE")
-            .or_else(|_| std::env::var("HOME"))
-            .unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(home).join(".yo").join("config.json")
+        PathBuf::from(get_home_dir()).join(".yo").join("config.json")
     }
 
     /// 加载配置

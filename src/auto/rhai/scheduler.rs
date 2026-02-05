@@ -2,8 +2,8 @@
 
 use super::engine::RhaiEngine;
 use super::index::TimeIndex;
-use super::types::{Rule, Trigger};
-use chrono::{DateTime, Datelike, Local, NaiveTime, Timelike};
+use super::types::{parse_time_to_minutes, Rule, Trigger};
+use chrono::{Datelike, Local, Timelike};
 use colored::Colorize;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -14,12 +14,14 @@ pub struct RhaiScheduler {
     rules: Vec<Rule>,
     index: TimeIndex,
     last_tick_minute: Option<u32>,
-    paused_until: Option<DateTime<Local>>,
+    /// 已模拟的规则（按日期+规则名记录，每天重置）
+    simulated_rules: std::collections::HashSet<String>,
+    simulate_date: Option<u32>,
 }
 
 impl RhaiScheduler {
     pub fn new() -> Result<Self, String> {
-        let engine = Arc::new(RhaiEngine::new());
+        let engine = Arc::new(RhaiEngine::new(true));
         println!("{}", "📂 Loading rules...".cyan().bold());
         let rules = engine.load_rules()?;
         let index = TimeIndex::build(&rules);
@@ -38,7 +40,12 @@ impl RhaiScheduler {
             }
         }
 
-        Ok(Self { engine, rules, index, last_tick_minute: None, paused_until: None })
+        Ok(Self {
+            engine, rules, index,
+            last_tick_minute: None,
+            simulated_rules: std::collections::HashSet::new(),
+            simulate_date: None,
+        })
     }
 
     /// 启动时调用所有规则的 on_mount
@@ -96,6 +103,22 @@ impl RhaiScheduler {
         println!("{}", "🔄 Reloading rules...".cyan());
         self.rules = self.engine.load_rules()?;
         self.index = TimeIndex::build(&self.rules);
+
+        // 清除已模拟记录，让修改后的规则可以重新预构建
+        self.simulated_rules.clear();
+
+        // 初始化新规则的时间范围状态
+        {
+            let state = self.engine.get_state();
+            let mut gs = state.lock().unwrap();
+            for rule in &self.rules {
+                if !gs.script_in_range.contains_key(&rule.name) {
+                    let in_range = Self::check_in_time_range(rule);
+                    gs.script_in_range.insert(rule.name.clone(), in_range);
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -114,47 +137,7 @@ impl RhaiScheduler {
         self.engine.get_state()
     }
 
-    /// 暂停所有规则指定分钟数
-    pub fn pause(&mut self, minutes: u32) {
-        let until = Local::now() + chrono::Duration::minutes(minutes as i64);
-        println!("{}", format!("⏸ Scheduler paused for {} minutes (until {})", minutes, until.format("%H:%M:%S")).yellow().bold());
-        self.paused_until = Some(until);
-    }
-
-    /// 取消暂停
-    pub fn resume(&mut self) {
-        if self.paused_until.is_some() {
-            println!("{}", "▶ Scheduler resumed".green().bold());
-            self.paused_until = None;
-        }
-    }
-
-    /// 是否处于暂停状态
-    pub fn is_paused(&mut self) -> bool {
-        if let Some(until) = self.paused_until {
-            if Local::now() >= until {
-                println!("{}", "▶ Pause expired, scheduler resumed".green().bold());
-                self.paused_until = None;
-                false
-            } else {
-                true
-            }
-        } else {
-            false
-        }
-    }
-
-    /// 暂停剩余秒数，None 表示未暂停
-    pub fn pause_remaining_secs(&self) -> Option<i64> {
-        self.paused_until.map(|until| {
-            let remaining = (until - Local::now()).num_seconds();
-            if remaining > 0 { remaining } else { 0 }
-        })
-    }
-
     pub fn on_tick(&mut self) {
-        if self.is_paused() { return; }
-
         let now = Local::now();
         let (hour, minute) = (now.hour(), now.minute());
 
@@ -163,6 +146,9 @@ impl RhaiScheduler {
 
         // 检查时间范围转换
         self.check_time_range_transitions();
+
+        // 预模拟即将激活的规则
+        self.simulate_upcoming_rules();
 
         let indices = match self.index.tick_rules.get(&hour) {
             Some(i) => i.clone(),
@@ -176,6 +162,63 @@ impl RhaiScheduler {
                     if let Err(e) = self.engine.call_on_tick(rule) {
                         println!("{}", format!("  ⚠ Error: {}", e).yellow());
                     }
+                }
+            }
+        }
+    }
+
+    /// TTS 缓存预热：提前 1 分钟模拟执行即将激活的规则
+    /// 使用独立 Engine 实例，让 speak 提前生成 TTS 缓存
+    fn simulate_upcoming_rules(&mut self) {
+        let now = Local::now();
+        let today = now.day();
+
+        // 日期变更，重置记录
+        if self.simulate_date != Some(today) {
+            self.simulated_rules.clear();
+            self.simulate_date = Some(today);
+        }
+
+        // 计算 1 分钟后的时间
+        let future = now + chrono::Duration::minutes(1);
+        let future_hour = future.hour();
+        let future_minute = future.minute();
+        let future_mins = future_hour * 60 + future_minute;
+
+        for rule in &self.rules {
+            if !rule.trigger.enabled { continue; }
+
+            // 检查是否已模拟
+            if self.simulated_rules.contains(&rule.name) { continue; }
+
+            // 检查星期限制
+            if let Some(ref weekdays) = rule.trigger.weekdays {
+                let today = future.weekday().num_days_from_monday() + 1;
+                if !weekdays.contains(&today) { continue; }
+            }
+
+            // 检查规则是否有时间范围
+            if let Some((ref start, _)) = rule.trigger.time_range {
+                let start_mins = parse_time_to_minutes(start) as u32;
+
+                // 如果 1 分钟后刚好是规则开始时间
+                if future_mins == start_mins {
+                    println!("{}", format!("🔮 Simulating [{}] (starts at {})", rule.name, start).cyan());
+
+                    // 创建独立 Engine 实例，避免与主 Engine 状态竞争
+                    let sim_engine = Arc::new(RhaiEngine::new(false));
+                    let rule_clone = rule.clone();
+                    let rule_name = rule.name.clone();
+                    let sim_hour = future_hour;
+                    let sim_minute = future_minute;
+
+                    std::thread::spawn(move || {
+                        if let Err(e) = sim_engine.prebuild_tts(&rule_clone, sim_hour, sim_minute) {
+                            println!("{}", format!("  ⚠ Prebuild error: {}", e).yellow());
+                        }
+                    });
+
+                    self.simulated_rules.insert(rule_name);
                 }
             }
         }
@@ -195,41 +238,44 @@ impl RhaiScheduler {
         }
 
         if let Some(interval) = trigger.interval_minutes {
-            if Self::minutes_since_start(trigger) % interval != 0 { return false; }
+            // 避免除零：interval 为 0 时视为每分钟执行
+            let interval = if interval == 0 { 1 } else { interval };
+            if !Self::minutes_since_start(trigger).is_multiple_of(interval) { return false; }
         }
 
         true
     }
 
     fn in_time_range(start: &str, end: &str) -> bool {
-        let now = Local::now().time();
-        let s = NaiveTime::parse_from_str(start, "%H:%M").ok();
-        let e = NaiveTime::parse_from_str(end, "%H:%M").ok();
-        match (s, e) {
-            (Some(st), Some(et)) if st > et => now >= st || now < et,
-            (Some(st), Some(et)) => now >= st && now < et,
-            _ => false,
+        let now = Local::now();
+        let now_mins = (now.hour() * 60 + now.minute()) as i64;
+        let s = parse_time_to_minutes(start);
+        let e = parse_time_to_minutes(end);
+
+        if s > e {
+            // 跨午夜
+            now_mins >= s || now_mins < e
+        } else {
+            now_mins >= s && now_mins < e
         }
     }
 
     fn minutes_since_start(trigger: &Trigger) -> u32 {
-        let now = Local::now().time();
+        let now = Local::now();
+        let now_mins = (now.hour() * 60 + now.minute()) as i64;
+
         if let Some((ref start, _)) = trigger.time_range {
-            if let Ok(st) = NaiveTime::parse_from_str(start, "%H:%M") {
-                let now_mins = now.hour() * 60 + now.minute();
-                let start_mins = st.hour() * 60 + st.minute();
-                return if now_mins >= start_mins {
-                    now_mins - start_mins
-                } else {
-                    24 * 60 - start_mins + now_mins
-                };
-            }
+            let start_mins = parse_time_to_minutes(start);
+            return if now_mins >= start_mins {
+                (now_mins - start_mins) as u32
+            } else {
+                (24 * 60 - start_mins + now_mins) as u32
+            };
         }
         now.minute()
     }
 
     pub fn on_unlock(&mut self) {
-        if self.is_paused() { return; }
         for idx in &self.index.unlock_rules {
             if let Some(rule) = self.rules.get(*idx) {
                 if !self.should_execute_event(rule) { continue; }
@@ -242,9 +288,10 @@ impl RhaiScheduler {
     }
 
     pub fn on_lock(&mut self) {
-        if self.is_paused() { return; }
         for idx in &self.index.lock_rules {
             if let Some(rule) = self.rules.get(*idx) {
+                if !self.should_execute_event(rule) { continue; }
+                println!("{}", format!("🔒 [{}] Processing lock", rule.name).yellow());
                 if let Err(e) = self.engine.call_on_lock(rule) {
                     println!("{}", format!("  ⚠ Error: {}", e).yellow());
                 }

@@ -90,6 +90,23 @@ impl VolcengineTtsClient {
         play_audio(&cache_file)
     }
 
+    /// 预生成缓存（不播放）
+    pub fn prefetch(&self, text: &str, speaker: &str) -> Result<bool, TtsError> {
+        let cache_dir = get_voice_dir()?.join("cache");
+        fs::create_dir_all(&cache_dir)
+            .map_err(|e| TtsError::SaveAudioFailed(e.to_string()))?;
+
+        let cache_key = Self::cache_key(text, speaker);
+        let cache_file = cache_dir.join(format!("{}.mp3", cache_key));
+
+        if cache_file.exists() {
+            return Ok(false); // 已缓存
+        }
+
+        self.synthesize_to_file(text, speaker, &cache_file)?;
+        Ok(true) // 新生成
+    }
+
     /// 整点报时
     pub fn hourly_chime(&self, hour: u32) -> Result<(), TtsError> {
         println!("{}", format!("🕐 Chime for {} o'clock", hour).cyan());
