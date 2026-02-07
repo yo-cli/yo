@@ -58,7 +58,9 @@
       "Bash(./target/release/yo-auto.exe:*)",
       "Bash(./target/release/yo-git.exe:*)",
       "Bash(./target/release/yo-s5.exe:*)",
-      "WebFetch(domain:dev.qweather.com)"
+      "WebFetch(domain:dev.qweather.com)",
+      "WebFetch(domain:microsoft.github.io)",
+      "WebFetch(domain:kennykerr.ca)"
     ],
     "deny": [],
     "ask": []

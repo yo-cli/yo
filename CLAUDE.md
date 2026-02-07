@@ -93,7 +93,7 @@ The codebase follows a domain-driven structure with 6 main modules under `src/`:
 2. **`github/`** - GitHub integration: encrypted token storage, Ed25519 key generation, REST API client
 3. **`s5/`** - SOCKS5 proxy: Docker management, GOST proxy lifecycle, network utilities
 4. **`auto/`** - Task scheduler subsystem (largest module), containing:
-   - `rhai/` - Scripting engine, scheduler loop, API registration, rule types, time indexing
+   - `rhai/` - Scripting engine, scheduler loop, API registration, rule types, time indexing, side-effect executor (`effects.rs`)
    - `config/` - GlobalConfig for environment variable management (`~/.yo/config.json`)
    - `screen/` - Lockscreen monitoring (Windows WTS APIs, cross-platform stubs)
    - `startup/` - Windows autostart via VBS script in Startup folder
@@ -101,15 +101,17 @@ The codebase follows a domain-driven structure with 6 main modules under `src/`:
    - `state/` - Single instance enforcement via PID file
    - `web/` - Axum-based REST API + static file serving for Web UI
    - `ui/` - Vue 3 Composition API frontend (`web_ui.html`)
+   - `calendar/` - Chinese calendar: festivals and solar terms
+   - `weather/` - QWeather API client (Ed25519 JWT auth)
 5. **`ob/`** - OceanBase environment configuration: system tuning, sysctl, IPv6 management
 6. **`common/`** - Shared utilities (AES-256-CBC encryption with MAC-address-derived key)
 
 **Binary structure** (`src/bin/`):
-- `yo_auto.rs` - Task scheduler with TTS and Web UI
-- `yo_git.rs` - GitHub SSH key management
-- `yo_s5.rs` - SOCKS5 proxy service
-- `yo_file.rs` - File utilities (template cloning)
-- `yo_ob.rs` - OceanBase environment tool
+- `yo_auto.rs` - Task scheduler with TTS and Web UI (binary name: `yo`)
+- `yo_git.rs` - GitHub SSH key management (binary name: `yo-git`)
+- `yo_s5.rs` - SOCKS5 proxy service (binary name: `yo-s5`)
+- `yo_file.rs` - File utilities (template cloning) (binary name: `yo-file`)
+- `yo_ob.rs` - OceanBase environment tool (binary name: `yo-ob`)
 
 ### Key Design Patterns
 
@@ -130,10 +132,16 @@ The codebase follows a domain-driven structure with 6 main modules under `src/`:
   - **Time**: `hour()`, `minute()`, `second()`, `weekday()`, `time_str()`, `date_str()`, `in_time_range(start, end)`, `is_weekend()`, `is_workday()`
   - **Actions**: `speak(text)`, `lock_screen()`, `shutdown(delay_secs)`, `chime(hour)`, `log(msg)`
   - **Screen**: `screen_locked()` - check if screen is currently locked
-  - **State**: `get_counter(name)`, `set_counter(name, value)` - persistent counters for tracking script state
+  - **State**: `get_counter(name)`, `set_counter(name, value)` - persistent counters (`~/.yo/script_state/{name}.json`)
   - **TTS config**: `configure_tts(api_key, voice)`
   - **Environment**: `get_env(name)`, `has_env(name)` - read from GlobalConfig
-  - **Calendar**: `generate_script_events(script_name)` - simulate and persist events to `events.json`
+  - **Calendar**: `get_today_festival()`, `get_today_solar_term()`, `generate_script_events(script_name)`
+  - **Weather**: `get_weather()`, `format_weather()` - QWeather API integration
+
+**Side-Effect Executor** (`rhai/effects.rs`):
+- `SideEffectExecutor` centralizes all side-effectful operations (TTS, lockscreen, shutdown)
+- Three run modes: `Real` (normal execution), `CacheTts` (prefetch audio), `GenerateEvents` (simulate for calendar)
+- In non-Real modes, side effects are logged/collected instead of executed
 
 **Task Scheduler Architecture**:
 - Persistent process (does NOT exit after launch)
@@ -169,6 +177,7 @@ The codebase follows a domain-driven structure with 6 main modules under `src/`:
 - `~/.yo/yo-auto.pid` - PID file for single instance lock
 - `~/.yo/github_token.enc` - Encrypted GitHub personal access token
 - `~/.ssh/config` - Modified by `init` command to add deploy key aliases
+- `~/.yo/script_state/*.json` - Persistent script counters (per-script isolation)
 - `voice/` directory - Generated TTS audio files
 - `%APPDATA%\...\Startup\yo-auto-web.vbs` - Windows autostart script
 
@@ -230,3 +239,12 @@ All platform-specific code uses `#[cfg(target_os = "...")]` conditional compilat
 - **Interactive prompts**: Uses `inquire` crate for user input dialogs
 - **Async runtime**: Tokio used for Web UI server; most other code is synchronous
 - **Concurrency**: `Arc<Mutex<T>>` for shared state in scheduler, `lazy_static` for globals
+- **Library crate**: Named `yo_lib` (used by all binaries via `use yo_lib::*`)
+
+## CI/CD
+
+- Push to `dev` branch triggers build pipeline (`.github/workflows/release.yml`)
+- Every dev push creates a pre-release with `-dev` version suffix
+- Version change in `Cargo.toml` (compared to `main`) triggers stable release: merges dev→main, creates git tag, publishes to GitHub Releases
+- Windows build: `yo` binary (x86_64-pc-windows-msvc, with audio feature)
+- Linux build: `yo-git`, `yo-s5`, `yo-file`, `yo-ob` (x86_64-unknown-linux-musl, statically linked)

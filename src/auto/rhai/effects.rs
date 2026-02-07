@@ -338,4 +338,24 @@ impl SideEffectExecutor {
     pub fn get_today_special(&self) -> String {
         crate::auto::calendar::get_today_special().unwrap_or_default()
     }
+
+    /// 修改密码为锁定密码
+    pub fn change_password(&self) {
+        if !self.is_real() {
+            return;
+        }
+        if let Err(e) = crate::auto::password::PasswordManager::change_password() {
+            println!("{}", format!("✗ change_password 失败: {}", e).red().bold());
+        }
+    }
+
+    /// 恢复原密码
+    pub fn restore_password(&self) {
+        if !self.is_real() {
+            return;
+        }
+        if let Err(e) = crate::auto::password::PasswordManager::restore_password() {
+            println!("{}", format!("✗ restore_password 失败: {}", e).red().bold());
+        }
+    }
 }

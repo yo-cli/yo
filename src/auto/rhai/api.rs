@@ -236,6 +236,18 @@ fn register_action_apis(
         e.log(msg);
     });
 
+    // change_password - 修改密码为锁定密码
+    let e = executor.clone();
+    engine.register_fn("change_password", move || {
+        e.change_password();
+    });
+
+    // restore_password - 恢复原密码
+    let e = executor.clone();
+    engine.register_fn("restore_password", move || {
+        e.restore_password();
+    });
+
     // configure_tts
     let s = state;
     engine.register_fn("configure_tts", move |api_key: &str, voice: &str| {

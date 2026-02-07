@@ -1,3 +1,4 @@
+use crate::auto::password::PasswordManager;
 use crate::auto::rhai::{set_global_scheduler, RhaiScheduler};
 use crate::auto::screen::LockscreenMonitor;
 use crate::auto::startup::{AutostartError, AutostartManager};
@@ -43,6 +44,9 @@ pub struct AutoCommand;
 impl AutoCommand {
     /// 执行 auto 命令
     pub fn execute() -> Result<(), AutoError> {
+        // 启动时检查未恢复的密码
+        PasswordManager::check_and_restore();
+
         let lock = InstanceLock::new()?;
         lock.try_acquire()?;
 
@@ -74,6 +78,9 @@ impl AutoCommand {
 
     /// 执行 auto 命令（带 Web UI）
     pub fn execute_with_web(port: u16) -> Result<(), AutoError> {
+        // 启动时检查未恢复的密码
+        PasswordManager::check_and_restore();
+
         let lock = InstanceLock::new()?;
         lock.try_acquire()?;
 
@@ -132,6 +139,15 @@ impl AutoCommand {
 
     /// 调度器循环（不持续持有锁）
     fn run_scheduler_loop(scheduler: Arc<Mutex<RhaiScheduler>>) -> Result<(), AutoError> {
+        // 注册 Ctrl+C / 关闭窗口 handler：退出前恢复密码
+        let _ = ctrlc::set_handler(move || {
+            if PasswordManager::is_password_changed() {
+                eprintln!("\n{}", "⚠ 正在恢复密码...".yellow());
+                let _ = PasswordManager::restore_password();
+            }
+            std::process::exit(0);
+        });
+
         println!("{}", format!("🚀 Started at {}", Local::now().format("%Y-%m-%d %H:%M:%S")).green().bold());
         println!("{}", "💡 Press Ctrl+C to stop".yellow());
         println!();

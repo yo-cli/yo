@@ -1,5 +1,6 @@
 pub mod calendar;
 pub mod config;
+pub mod password;
 pub mod rhai;
 pub mod screen;
 pub mod startup;
