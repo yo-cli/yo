@@ -307,6 +307,15 @@
         .env-value.masked {
             color: #999;
         }
+        .env-edit-input {
+            flex: 1;
+            padding: 6px 10px;
+            border: 2px solid #4CAF50;
+            border-radius: 6px;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 14px;
+            outline: none;
+        }
         .env-actions {
             display: flex;
             gap: 8px;
@@ -1339,16 +1348,28 @@
                     </div>
                     <div v-for="(value, key) in envVars" :key="key" class="env-item">
                         <span class="env-key">{{ key }}</span>
-                        <span class="env-value" :class="{ masked: isSensitive(key) && !showValues[key] }">
-                            {{ isSensitive(key) && !showValues[key] ? maskValue(value) : value }}
-                        </span>
-                        <div class="env-actions">
-                            <button v-if="isSensitive(key)" class="btn btn-small btn-secondary"
-                                    @click="showValues[key] = !showValues[key]">
-                                {{ showValues[key] ? 'Hide' : 'Show' }}
-                            </button>
-                            <button class="btn btn-small btn-danger" @click="confirmDeleteEnv(key)">Delete</button>
-                        </div>
+                        <template v-if="editingEnv.key === key">
+                            <input class="env-edit-input" v-model="editingEnv.value"
+                                   @keyup.enter="saveEnvEdit" @keyup.escape="editingEnv.key = ''"
+                                   ref="envEditInput">
+                            <div class="env-actions">
+                                <button class="btn btn-small" @click="saveEnvEdit">Save</button>
+                                <button class="btn btn-small btn-cancel" @click="editingEnv.key = ''">Cancel</button>
+                            </div>
+                        </template>
+                        <template v-else>
+                            <span class="env-value" :class="{ masked: isSensitive(key) && !showValues[key] }"
+                                  @dblclick="startEditEnv(key, value)">
+                                {{ isSensitive(key) && !showValues[key] ? maskValue(value) : value }}
+                            </span>
+                            <div class="env-actions">
+                                <button v-if="isSensitive(key)" class="btn btn-small btn-secondary"
+                                        @click="showValues[key] = !showValues[key]">
+                                    {{ showValues[key] ? 'Hide' : 'Show' }}
+                                </button>
+                                <button class="btn btn-small btn-danger" @click="confirmDeleteEnv(key)">Delete</button>
+                            </div>
+                        </template>
                     </div>
                     <div class="add-env-form">
                         <input v-model="newEnvKey" class="key-input" placeholder="KEY" @keyup.enter="addEnvVar">
@@ -1523,7 +1544,7 @@ if has_env("TTS_API_KEY") {
     </div>
 
     <script>
-        const { createApp, ref, computed, onMounted, onUnmounted } = Vue;
+        const { createApp, ref, computed, onMounted, onUnmounted, nextTick } = Vue;
 
         createApp({
             setup() {
@@ -1550,6 +1571,8 @@ if has_env("TTS_API_KEY") {
                 const savingEnv = ref(false);
                 const deletingEnv = ref(false);
                 const deleteEnvModal = ref({ show: false, key: '' });
+                const editingEnv = ref({ key: '', value: '' });
+                const envEditInput = ref(null);
                 // Import state
                 const importInput = ref(null);
                 const importModal = ref({
@@ -2032,6 +2055,32 @@ fn on_tick() {
                         showToast('Failed to add environment variable', 'error');
                     }
                     savingEnv.value = false;
+                };
+
+                const startEditEnv = (key, value) => {
+                    editingEnv.value = { key, value };
+                    nextTick(() => { if (envEditInput.value) envEditInput.value.focus(); });
+                };
+
+                const saveEnvEdit = async () => {
+                    if (!editingEnv.value.key) return;
+                    try {
+                        const res = await fetch('/api/config/env', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ key: editingEnv.value.key, value: editingEnv.value.value })
+                        });
+                        const data = await res.json();
+                        if (data.success) {
+                            showToast(`Updated ${editingEnv.value.key}`);
+                            await loadConfig();
+                        } else {
+                            showToast(data.message, 'error');
+                        }
+                    } catch (e) {
+                        showToast('Failed to update', 'error');
+                    }
+                    editingEnv.value.key = '';
                 };
 
                 const confirmDeleteEnv = (key) => {
@@ -2699,6 +2748,10 @@ fn on_tick() {
                     addEnvVar,
                     confirmDeleteEnv,
                     deleteEnvVar,
+                    editingEnv,
+                    envEditInput,
+                    startEditEnv,
+                    saveEnvEdit,
                     // Calendar methods
                     loadEvents,
                     formatDateDisplay,

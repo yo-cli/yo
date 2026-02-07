@@ -60,7 +60,9 @@
       "Bash(./target/release/yo-s5.exe:*)",
       "WebFetch(domain:dev.qweather.com)",
       "WebFetch(domain:microsoft.github.io)",
-      "WebFetch(domain:kennykerr.ca)"
+      "WebFetch(domain:kennykerr.ca)",
+      "Bash(reg add \"HKCU\\\\SOFTWARE\\\\Policies\\\\Google\\\\Chrome\\\\URLBlocklist\" /v 1 /t REG_SZ /d youtube.com /f)",
+      "Bash(cmd //c:*)"
     ],
     "deny": [],
     "ask": []

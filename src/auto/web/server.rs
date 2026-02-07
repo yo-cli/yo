@@ -199,7 +199,7 @@ pub async fn run_web_server(state: Arc<WebState>, port: u16) {
         .route("/api/script/{name}/simulate", axum::routing::post(simulate_script_handler))
         .route("/api/config", get(get_config))
         .route("/api/config/env", axum::routing::post(set_env).delete(delete_env))
-        .with_state(state);
+.with_state(state);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     println!("🌐 Web UI: http://127.0.0.1:{}", port);
