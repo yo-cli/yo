@@ -55,10 +55,32 @@ impl PasswordManager {
             return Ok(());
         }
         let original = Self::load_password()?;
-        Self::win32_change_password(&original, LOCK_PASSWORD)?;
-        Self::set_marker()?;
-        println!("{}", "🔒 密码已修改".cyan());
-        Ok(())
+        match Self::win32_change_password(&original, LOCK_PASSWORD) {
+            Ok(()) => {
+                Self::set_marker()?;
+                println!("{}", "🔒 密码已修改".cyan());
+                Ok(())
+            }
+            Err(e) if e.contains("86") => {
+                // error 86 = 原密码不匹配，密码可能已是 LOCK_PASSWORD 但 marker 丢失
+                // 尝试自愈：先恢复再改密
+                println!("{}", "⚠ 检测到密码状态不一致，尝试自愈...".yellow());
+                match Self::win32_change_password(LOCK_PASSWORD, &original) {
+                    Ok(()) => {
+                        // 恢复成功，说明确实是 LOCK_PASSWORD，重新改密
+                        Self::win32_change_password(&original, LOCK_PASSWORD)?;
+                        Self::set_marker()?;
+                        println!("{}", "🔒 密码已修改（自愈成功）".cyan());
+                        Ok(())
+                    }
+                    Err(_) => {
+                        // 恢复也失败，配置的密码可能有误
+                        Err(format!("密码状态不一致且自愈失败，请检查 {} 配置", PASSWORD_KEY))
+                    }
+                }
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// 恢复原密码
