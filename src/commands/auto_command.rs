@@ -159,11 +159,13 @@ impl AutoCommand {
         }
 
         loop {
-            // 只在执行时获取锁，执行完立即释放
-            {
+            // 收集待执行规则（短暂持锁），然后释放锁再执行
+            let pending = {
                 let mut s = scheduler.lock().unwrap();
-                s.on_tick();
-            }
+                s.prepare_tick()
+            };
+            // 锁已释放，TTS 播放不会阻塞 Web UI
+            pending.execute();
 
             let now = Local::now();
 

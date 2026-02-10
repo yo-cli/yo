@@ -9,6 +9,41 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+/// 待执行的规则调用（在释放 scheduler 锁之后执行）
+pub struct PendingExecutions {
+    engine: Arc<RhaiEngine>,
+    calls: Vec<(Rule, &'static str)>,
+}
+
+impl PendingExecutions {
+    fn new(engine: Arc<RhaiEngine>) -> Self {
+        Self { engine, calls: Vec::new() }
+    }
+
+    fn push(&mut self, rule: Rule, fn_name: &'static str) {
+        self.calls.push((rule, fn_name));
+    }
+
+    /// 执行所有待处理的规则调用（调用前必须已释放 scheduler 锁）
+    pub fn execute(self) {
+        for (rule, fn_name) in self.calls {
+            let result = match fn_name {
+                "on_tick" => self.engine.call_on_tick(&rule),
+                "on_unlock" => self.engine.call_on_unlock(&rule),
+                "on_lock" => self.engine.call_on_lock(&rule),
+                "on_destroy" => self.engine.call_on_destroy(&rule),
+                "on_mount" => self.engine.call_on_mount(&rule),
+                _ => Ok(()),
+            };
+            if let Err(e) = result {
+                if !e.contains("not found") {
+                    println!("{}", format!("  ⚠ [{}] {} error: {}", rule.name, fn_name, e).yellow());
+                }
+            }
+        }
+    }
+}
+
 pub struct RhaiScheduler {
     engine: Arc<RhaiEngine>,
     rules: Vec<Rule>,
@@ -69,8 +104,8 @@ impl RhaiScheduler {
         }
     }
 
-    /// 检查时间范围转换，调用 on_destroy
-    fn check_time_range_transitions(&self) {
+    /// 检查时间范围转换，收集 on_destroy 调用到 pending
+    fn collect_time_range_transitions(&self, pending: &mut PendingExecutions) {
         let state = self.engine.get_state();
 
         for rule in &self.rules {
@@ -81,14 +116,10 @@ impl RhaiScheduler {
                 gs.script_in_range.get(&rule.name).copied().unwrap_or(false)
             };
 
-            // 从范围内 -> 范围外，调用 on_destroy
+            // 从范围内 -> 范围外，收集 on_destroy
             if was_in_range && !currently_in_range {
                 println!("{}", format!("🔚 [{}] Leaving time range, calling on_destroy", rule.name).yellow());
-                if let Err(e) = self.engine.call_on_destroy(rule) {
-                    if !e.contains("not found") {
-                        println!("{}", format!("  ⚠ on_destroy error: {}", e).yellow());
-                    }
-                }
+                pending.push(rule.clone(), "on_destroy");
             }
 
             // 更新状态
@@ -137,34 +168,65 @@ impl RhaiScheduler {
         self.engine.get_state()
     }
 
-    pub fn on_tick(&mut self) {
+    /// 收集 tick 待执行的规则（持有锁时调用），返回后释放锁再执行
+    pub fn prepare_tick(&mut self) -> PendingExecutions {
+        let mut pending = PendingExecutions::new(self.engine.clone());
+
         let now = Local::now();
         let (hour, minute) = (now.hour(), now.minute());
 
-        if self.last_tick_minute == Some(minute) { return; }
+        if self.last_tick_minute == Some(minute) { return pending; }
         self.last_tick_minute = Some(minute);
 
-        // 检查时间范围转换
-        self.check_time_range_transitions();
+        // 收集时间范围转换
+        self.collect_time_range_transitions(&mut pending);
 
         // 预模拟即将激活的规则
         self.simulate_upcoming_rules();
 
         let indices = match self.index.tick_rules.get(&hour) {
             Some(i) => i.clone(),
-            None => return,
+            None => return pending,
         };
 
         for idx in indices {
             if let Some(rule) = self.rules.get(idx) {
                 if self.should_execute(rule) {
                     println!("{}", format!("⏰ [{}] Executing tick", rule.name).yellow());
-                    if let Err(e) = self.engine.call_on_tick(rule) {
-                        println!("{}", format!("  ⚠ Error: {}", e).yellow());
-                    }
+                    pending.push(rule.clone(), "on_tick");
                 }
             }
         }
+
+        pending
+    }
+
+    /// 收集 unlock 待执行的规则
+    pub fn prepare_unlock(&self) -> PendingExecutions {
+        let mut pending = PendingExecutions::new(self.engine.clone());
+        for idx in &self.index.unlock_rules {
+            if let Some(rule) = self.rules.get(*idx) {
+                if self.should_execute_event(rule) {
+                    println!("{}", format!("🔓 [{}] Processing unlock", rule.name).yellow());
+                    pending.push(rule.clone(), "on_unlock");
+                }
+            }
+        }
+        pending
+    }
+
+    /// 收集 lock 待执行的规则
+    pub fn prepare_lock(&self) -> PendingExecutions {
+        let mut pending = PendingExecutions::new(self.engine.clone());
+        for idx in &self.index.lock_rules {
+            if let Some(rule) = self.rules.get(*idx) {
+                if self.should_execute_event(rule) {
+                    println!("{}", format!("🔒 [{}] Processing lock", rule.name).yellow());
+                    pending.push(rule.clone(), "on_lock");
+                }
+            }
+        }
+        pending
     }
 
     /// TTS 缓存预热：提前 1 分钟模拟执行即将激活的规则
@@ -275,29 +337,6 @@ impl RhaiScheduler {
         now.minute()
     }
 
-    pub fn on_unlock(&mut self) {
-        for idx in &self.index.unlock_rules {
-            if let Some(rule) = self.rules.get(*idx) {
-                if !self.should_execute_event(rule) { continue; }
-                println!("{}", format!("🔓 [{}] Processing unlock", rule.name).yellow());
-                if let Err(e) = self.engine.call_on_unlock(rule) {
-                    println!("{}", format!("  ⚠ Error: {}", e).yellow());
-                }
-            }
-        }
-    }
-
-    pub fn on_lock(&mut self) {
-        for idx in &self.index.lock_rules {
-            if let Some(rule) = self.rules.get(*idx) {
-                if !self.should_execute_event(rule) { continue; }
-                println!("{}", format!("🔒 [{}] Processing lock", rule.name).yellow());
-                if let Err(e) = self.engine.call_on_lock(rule) {
-                    println!("{}", format!("  ⚠ Error: {}", e).yellow());
-                }
-            }
-        }
-    }
 
     fn should_execute_event(&self, rule: &Rule) -> bool {
         if let Some((ref s, ref e)) = rule.trigger.time_range {
@@ -320,7 +359,8 @@ impl RhaiScheduler {
         self.call_on_mount_all();
 
         loop {
-            self.on_tick();
+            let pending = self.prepare_tick();
+            pending.execute();
             let now = Local::now();
             if now.minute() == 0 && now.second() < 30 {
                 let _ = self.reload();
@@ -352,13 +392,27 @@ pub fn set_global_scheduler(scheduler: Arc<Mutex<RhaiScheduler>>) {
 }
 
 pub fn trigger_unlock_event() {
-    if let Some(ref s) = *GLOBAL_SCHEDULER.lock().unwrap() {
-        s.lock().unwrap().on_unlock();
-    }
+    let pending = {
+        let global = GLOBAL_SCHEDULER.lock().unwrap();
+        if let Some(ref s) = *global {
+            s.lock().unwrap().prepare_unlock()
+        } else {
+            return;
+        }
+    };
+    // 锁已释放，执行不会阻塞 Web UI
+    pending.execute();
 }
 
 pub fn trigger_lock_event() {
-    if let Some(ref s) = *GLOBAL_SCHEDULER.lock().unwrap() {
-        s.lock().unwrap().on_lock();
-    }
+    let pending = {
+        let global = GLOBAL_SCHEDULER.lock().unwrap();
+        if let Some(ref s) = *global {
+            s.lock().unwrap().prepare_lock()
+        } else {
+            return;
+        }
+    };
+    // 锁已释放，执行不会阻塞 Web UI
+    pending.execute();
 }
