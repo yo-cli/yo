@@ -96,10 +96,10 @@ jobs:
 
       - name: Build Linux binaries
         run: |
-          cargo build --release --target x86_64-unknown-linux-musl --bin yo-git
-          cargo build --release --target x86_64-unknown-linux-musl --bin yo-s5
-          cargo build --release --target x86_64-unknown-linux-musl --bin yo-file
-          cargo build --release --target x86_64-unknown-linux-musl --bin yo-ob
+          cargo build --release --target x86_64-unknown-linux-musl --no-default-features --bin yo-git
+          cargo build --release --target x86_64-unknown-linux-musl --no-default-features --bin yo-s5
+          cargo build --release --target x86_64-unknown-linux-musl --no-default-features --bin yo-file
+          cargo build --release --target x86_64-unknown-linux-musl --no-default-features --bin yo-ob
 
       - name: Upload yo-git
         uses: actions/upload-artifact@v4
