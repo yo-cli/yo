@@ -62,7 +62,11 @@
       "WebFetch(domain:microsoft.github.io)",
       "WebFetch(domain:kennykerr.ca)",
       "Bash(reg add \"HKCU\\\\SOFTWARE\\\\Policies\\\\Google\\\\Chrome\\\\URLBlocklist\" /v 1 /t REG_SZ /d youtube.com /f)",
-      "Bash(cmd //c:*)"
+      "Bash(cmd //c:*)",
+      "Bash(export PATH=\"$HOME/.cargo/bin:$PATH\")",
+      "Bash(rustup default:*)",
+      "Bash(apt-get:*)",
+      "Bash(apt-get install:*)"
     ],
     "deny": [],
     "ask": []

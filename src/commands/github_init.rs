@@ -288,12 +288,32 @@ impl GitHubInitCommand {
             return Err(InitError::InsufficientPermissions);
         }
 
-        // 生成 SSH 密钥对
-        println!("{}", "ℹ Generating SSH key pair...".blue().bold());
-        let key_pair = SSHKeyManager::generate_key_pair(&repo_info.username, &repo_info.repository)
+        // 生成 SSH 密钥对（如果已存在则复用）
+        let existing = SSHKeyManager::get_existing_key_pair(&repo_info.username, &repo_info.repository)
             .map_err(|e| InitError::SSHKeyGenerationFailed(format!("{}", e)))?;
 
-        println!("{}", "✓ SSH key pair generated:".green().bold());
+        let reusing = existing.is_some();
+
+        let key_pair = if let Some(kp) = existing {
+            println!(
+                "{}",
+                "ℹ Existing SSH key pair found, reusing...".yellow().bold()
+            );
+            kp
+        } else {
+            println!("{}", "ℹ Generating SSH key pair...".blue().bold());
+            SSHKeyManager::generate_key_pair(&repo_info.username, &repo_info.repository)
+                .map_err(|e| InitError::SSHKeyGenerationFailed(format!("{}", e)))?
+        };
+
+        println!(
+            "{}",
+            if reusing {
+                "✓ SSH key pair reused:".green().bold()
+            } else {
+                "✓ SSH key pair generated:".green().bold()
+            }
+        );
         println!(
             "{}",
             format!("  Private key: {}", key_pair.private_key_path)
@@ -315,20 +335,29 @@ impl GitHubInitCommand {
             "{}",
             "ℹ Adding deploy key to GitHub repository...".blue().bold()
         );
-        api_client
-            .add_deploy_key(
-                &repo_info.username,
-                &repo_info.repository,
-                &deploy_key_title,
-                &key_pair.public_key_content,
-                false,
-            )
-            .map_err(|e| InitError::DeployKeyFailed(format!("{}", e)))?;
-
-        println!(
-            "{}",
-            "✓ Deploy key added to GitHub repository".green().bold()
-        );
+        match api_client.add_deploy_key(
+            &repo_info.username,
+            &repo_info.repository,
+            &deploy_key_title,
+            &key_pair.public_key_content,
+            false,
+        ) {
+            Ok(()) => {
+                println!(
+                    "{}",
+                    "✓ Deploy key added to GitHub repository".green().bold()
+                );
+            }
+            Err(ref e) if reusing && format!("{}", e).contains("already exists") => {
+                println!(
+                    "{}",
+                    "✓ Deploy key already exists on GitHub, skipping".yellow().bold()
+                );
+            }
+            Err(e) => {
+                return Err(InitError::DeployKeyFailed(format!("{}", e)));
+            }
+        }
 
         // 更新 SSH 配置
         println!("{}", "ℹ Updating SSH configuration...".blue().bold());

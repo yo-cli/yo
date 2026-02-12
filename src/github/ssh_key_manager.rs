@@ -111,7 +111,24 @@ impl SSHKeyManager {
         Ok(content.to_string())
     }
 
-    /// 生成密钥对
+    /// 获取已存在的密钥对
+    pub fn get_existing_key_pair(username: &str, repo: &str) -> Result<Option<KeyPair>, SSHError> {
+        let private_key_path = Self::get_private_key_path(username, repo)?;
+        let public_key_path = Self::get_public_key_path(username, repo)?;
+
+        if private_key_path.exists() && public_key_path.exists() {
+            let public_key_content = Self::read_public_key(&public_key_path)?;
+            Ok(Some(KeyPair {
+                private_key_path: private_key_path.to_string_lossy().to_string(),
+                public_key_path: public_key_path.to_string_lossy().to_string(),
+                public_key_content,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// 生成密钥对（如果已存在则复用）
     pub fn generate_key_pair(username: &str, repo: &str) -> Result<KeyPair, SSHError> {
         // 确保密钥目录存在
         Self::ensure_key_directory(username)?;
@@ -119,12 +136,22 @@ impl SSHKeyManager {
         let private_key_path = Self::get_private_key_path(username, repo)?;
         let public_key_path = Self::get_public_key_path(username, repo)?;
 
-        // 检查密钥是否已存在
-        if private_key_path.exists() || public_key_path.exists() {
-            return Err(SSHError::KeysExist(
-                username.to_string(),
-                repo.to_string(),
-            ));
+        // 如果密钥已存在，直接复用
+        if private_key_path.exists() && public_key_path.exists() {
+            let public_key_content = Self::read_public_key(&public_key_path)?;
+            return Ok(KeyPair {
+                private_key_path: private_key_path.to_string_lossy().to_string(),
+                public_key_path: public_key_path.to_string_lossy().to_string(),
+                public_key_content,
+            });
+        }
+
+        // 如果只有其中一个存在，清理后重新生成
+        if private_key_path.exists() {
+            fs::remove_file(&private_key_path)?;
+        }
+        if public_key_path.exists() {
+            fs::remove_file(&public_key_path)?;
         }
 
         // 生成 Ed25519 密钥对
