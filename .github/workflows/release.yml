@@ -65,10 +65,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build yo-auto (with audio support)
-        run: cargo build --release --bin yo --features audio
-
-      - name: Rename to yo-auto.exe
-        run: mv target/release/yo.exe target/release/yo-auto.exe
+        run: cargo build --release --bin yo-auto --features audio
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

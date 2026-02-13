@@ -348,7 +348,7 @@ impl GitHubInitCommand {
                     "✓ Deploy key added to GitHub repository".green().bold()
                 );
             }
-            Err(ref e) if reusing && format!("{}", e).contains("already exists") => {
+            Err(ref e) if reusing && (format!("{}", e).contains("already exists") || format!("{}", e).contains("422")) => {
                 println!(
                     "{}",
                     "✓ Deploy key already exists on GitHub, skipping".yellow().bold()

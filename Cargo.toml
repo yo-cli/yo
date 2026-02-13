@@ -12,7 +12,7 @@ path = "src/lib.rs"
 
 # Binary: Main entry point (Windows) - supports "yo run auto" syntax
 [[bin]]
-name = "yo"
+name = "yo-auto"
 path = "src/bin/yo_auto.rs"
 
 # Binary: GitHub SSH key management (Linux musl)

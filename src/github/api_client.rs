@@ -242,13 +242,14 @@ impl GitHubAPIClient {
             Ok(())
         } else {
             let error_body = response.text().unwrap_or_default();
-            let api_message = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&error_body) {
-                json.get("message")
+            let (api_message, full_body) = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&error_body) {
+                let msg = json.get("message")
                     .and_then(|m| m.as_str())
                     .unwrap_or("Unknown error")
-                    .to_string()
+                    .to_string();
+                (msg, json)
             } else {
-                "Unknown error".to_string()
+                ("Unknown error".to_string(), serde_json::Value::Null)
             };
 
             let message = match status_code {
@@ -256,7 +257,11 @@ impl GitHubAPIClient {
                 403 => "Permission denied. Token needs 'admin' access to repository (Classic: 'repo' scope, Fine-grained: 'Administration: Read and write')".to_string(),
                 404 => format!("Repository not found or no access: {}", api_message),
                 422 => {
-                    if api_message.contains("key is already in use") {
+                    // GitHub 把 "key is already in use" 放在 errors 数组里
+                    let errors_str = full_body.get("errors")
+                        .map(|e| e.to_string())
+                        .unwrap_or_default();
+                    if errors_str.contains("key is already in use") || api_message.contains("key is already in use") {
                         "Deploy key already exists for this repository".to_string()
                     } else {
                         api_message
