@@ -10,11 +10,6 @@ description = "A multi-functional command-line tool with GitHub SSH key manageme
 name = "yo_lib"
 path = "src/lib.rs"
 
-# Binary: Main entry point (Windows) - supports "yo run auto" syntax
-[[bin]]
-name = "yo-auto"
-path = "src/bin/yo_auto.rs"
-
 # Binary: GitHub SSH key management (Linux musl)
 [[bin]]
 name = "yo-git"
@@ -40,10 +35,6 @@ path = "src/bin/yo_ob.rs"
 tokio = { version = "1", features = ["full"] }
 # HTTP client for API requests (use rustls instead of openssl)
 reqwest = { version = "0.13", features = ["blocking", "json", "rustls", "gzip"], default-features = false }
-# Web framework
-axum = "0.8"
-tower = "0.5"
-tower-http = { version = "0.6", features = ["fs", "cors"] }
 # JSON serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -66,49 +57,18 @@ socket2 = "0.6"
 # System utilities
 hostname = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
-# Audio playback (optional, Windows only)
-rodio = { version = "0.21", optional = true }
-# Lazy static for global state
-lazy_static = "1.4"
 # Interactive prompts
 inquire = "0.9"
 # Directory walking
 walkdir = "2.5"
-# Rhai scripting engine
-rhai = { version = "1.19", features = ["sync"] }
 # CLI argument parsing
 clap = { version = "4", features = ["derive"] }
 # Home directory detection
 dirs-next = "2.0"
-# URL encoding
-urlencoding = "2.1"
-# Ed25519 signing for QWeather JWT auth
-ed25519-dalek = { version = "2.1", features = ["rand_core"] }
-# SSH key parsing
-ssh-key = { version = "0.6", features = ["ed25519"] }
-# Ctrl+C handler
-ctrlc = "3.4"
-
-[features]
-default = ["audio"]
-audio = ["rodio"]
 
 [target.'cfg(unix)'.dependencies]
 # Unix system calls
 nix = { version = "0.29", features = ["user"] }
-
-[target.'cfg(windows)'.dependencies]
-# Windows API for session monitoring
-windows = { version = "0.62", features = [
-    "Win32_System_RemoteDesktop",
-    "Win32_Foundation",
-    "Win32_UI_WindowsAndMessaging",
-    "Win32_Graphics_Gdi",
-    "Win32_System_LibraryLoader",
-    "Win32_System_Diagnostics_ToolHelp",
-    "Win32_NetworkManagement_NetManagement",
-    "Win32_System_WindowsProgramming"
-] }
 
 [profile.release]
 opt-level = 3

@@ -86,7 +86,9 @@
       "Bash(dotnet build:*)",
       "Bash(dotnet publish:*)",
       "WebFetch(domain:ui.shadcn.com)",
-      "Bash(dotnet run:*)"
+      "Bash(dotnet run:*)",
+      "Bash(git -C /mnt/d/code/ydcode/yo log --oneline --all)",
+      "Bash(git -C /mnt/d/code/ydcode/yo branch -a)"
     ],
     "deny": [],
     "ask": []
