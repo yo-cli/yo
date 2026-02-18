@@ -2,21 +2,18 @@
 
 ```bash
 # Build
-cargo build --release --bin yo-git --no-default-features
+cargo build --release --bin yo-git
 
 # Install
 sudo cp target/release/yo-git /usr/local/bin/yo
 ```
 
-
-# Windows - yo-auto (Git Bash)
+# Linux - yo-file
 
 ```bash
-export CARGO_TARGET_DIR="C:/Users/DEV/.cargo-target"
-
 # Build
-cargo build --release --bin yo-auto
+cargo build --release --bin yo-file
 
 # Install
-cp C:/Users/DEV/.cargo-target/release/yo-auto.exe ~/.cargo/bin/yo.exe
+sudo cp target/release/yo-file /usr/local/bin/yo-file
 ```

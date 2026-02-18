@@ -1,11 +1,10 @@
 use colored::Colorize;
-use inquire::Text;
+use ignore::WalkBuilder;
+use inquire::{Confirm, Select, Text};
 use std::collections::HashMap;
 use std::fs;
-use std::io::{self, Write as IoWrite};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
-use walkdir::WalkDir;
 
 #[derive(Debug, Error)]
 pub enum CloneError {
@@ -21,7 +20,7 @@ pub enum CloneError {
     #[error("Regex error: {0}")]
     RegexError(#[from] regex::Error),
     #[error("Walk directory error: {0}")]
-    WalkDirError(#[from] walkdir::Error),
+    WalkDirError(#[from] ignore::Error),
 }
 
 /// 字符类型
@@ -172,120 +171,242 @@ impl CloneCommand {
         println!("{}", "📋 Template Clone Tool".cyan().bold());
         println!();
 
-        // 1. 询问原关键词
-        let old_keyword = Text::new("Enter original keyword:")
+        // Step 1: Scan all entries (respecting .gitignore) → type glob to filter → select
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+        print!("  {} Scanning...", "ℹ".blue());
+        std::io::Write::flush(&mut std::io::stdout()).ok();
+
+        let mut dir_entries: Vec<String> = Vec::new();
+        let mut file_entries: Vec<String> = Vec::new();
+
+        let walker = WalkBuilder::new(&cwd)
+            .max_depth(Some(5))
+            .hidden(true)       // skip hidden files/dirs
+            .git_ignore(true)   // respect .gitignore
+            .git_global(true)   // respect global gitignore
+            .git_exclude(true)  // respect .git/info/exclude
+            .build();
+
+        for entry in walker {
+            if let Ok(entry) = entry {
+                let rel = entry.path().strip_prefix(&cwd)
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| entry.path().display().to_string());
+                if rel.is_empty() {
+                    continue;
+                }
+                match entry.file_type() {
+                    Some(ft) if ft.is_dir() => dir_entries.push(format!("{}/", rel)),
+                    Some(ft) if ft.is_file() => file_entries.push(rel),
+                    _ => {}
+                }
+            }
+        }
+
+        dir_entries.sort();
+        file_entries.sort();
+
+        println!(" {} dirs, {} files",
+            dir_entries.len().to_string().cyan(),
+            file_entries.len().to_string().cyan(),
+        );
+
+        // Directories first, then files
+        let mut candidates = dir_entries;
+        candidates.extend(file_entries);
+
+        if candidates.is_empty() {
+            println!("{}", "  ✗ No entries found.".red());
+            return Ok(());
+        }
+
+        // Custom scorer: supports * and ? glob on the file/dir name part
+        let glob_scorer = &|input: &str, _opt: &String, string_value: &str, _idx: usize| -> Option<i64> {
+            let input = input.trim();
+            if input.is_empty() {
+                return Some(0);
+            }
+            let is_dir = string_value.ends_with('/');
+            let path = string_value.trim_end_matches('/');
+            let matched = if input.contains('*') || input.contains('?') {
+                // Wildcards → glob match against full path, auto-wrap with *
+                let pattern = format!(
+                    "{}{}{}",
+                    if input.starts_with('*') { "" } else { "*" },
+                    input,
+                    if input.ends_with('*') { "" } else { "*" },
+                );
+                Self::glob_match(&pattern, path)
+            } else {
+                // No wildcards → substring match against full path
+                path.to_lowercase().contains(&input.to_lowercase())
+            };
+            if matched {
+                Some(if is_dir { 1000 } else { 0 })
+            } else {
+                None
+            }
+        };
+
+        let selected = Select::new("Source (type to filter, supports *?):", candidates)
+            .with_scorer(glob_scorer)
             .prompt()
             .map_err(|_| CloneError::UserCancelled)?;
 
-        // 2. 询问新关键词
-        let new_keyword = Text::new("Enter new keyword:")
+        let source = cwd.join(selected.trim_end_matches('/'));
+
+        // Step 2: Old keyword
+        let old_keyword = Text::new("Original keyword:")
+            .prompt()
+            .map_err(|_| CloneError::UserCancelled)?;
+
+        // Step 3: New keyword
+        let new_keyword = Text::new("New keyword:")
             .prompt()
             .map_err(|_| CloneError::UserCancelled)?;
 
         println!();
 
-        // 生成关键词变体
+        // Generate keyword variants
         let old_variants = KeywordVariants::from_input(&old_keyword);
         let new_variants = KeywordVariants::from_input(&new_keyword);
+        let replacement_map = old_variants.get_replacement_map(&new_variants);
 
+        // Step 4: Preview
         println!("{}", "🔄 Keyword variants:".blue().bold());
-        println!("  Old: {} | {} | {} | {} | {}",
+        println!(
+            "  {} → {}",
             old_variants.kebab_case.yellow(),
-            old_variants.snake_case.yellow(),
-            old_variants.pascal_case.yellow(),
-            old_variants.camel_case.yellow(),
-            old_variants.screaming_snake.yellow()
+            new_variants.kebab_case.green()
         );
-        println!("  New: {} | {} | {} | {} | {}",
-            new_variants.kebab_case.green(),
-            new_variants.snake_case.green(),
-            new_variants.pascal_case.green(),
-            new_variants.camel_case.green(),
+        println!(
+            "  {} → {}",
+            old_variants.snake_case.yellow(),
+            new_variants.snake_case.green()
+        );
+        println!(
+            "  {} → {}",
+            old_variants.pascal_case.yellow(),
+            new_variants.pascal_case.green()
+        );
+        println!(
+            "  {} → {}",
+            old_variants.camel_case.yellow(),
+            new_variants.camel_case.green()
+        );
+        println!(
+            "  {} → {}",
+            old_variants.screaming_snake.yellow(),
             new_variants.screaming_snake.green()
         );
         println!();
 
-        // 3. 循环收集源路径
-        let mut sources: Vec<PathBuf> = Vec::new();
-        let mut index = 1;
+        let target = Self::get_target_path(&source, &replacement_map)?;
+        println!(
+            "  {} {} → {} {}",
+            "Source:".bold(),
+            source.display().to_string().yellow(),
+            "Target:".bold(),
+            target.display().to_string().green()
+        );
+        println!();
 
-        println!("{}", "📂 Add source paths (enter empty to finish):".blue().bold());
-        loop {
-            let prompt = format!("Source path #{}", index);
-            let input = Text::new(&prompt)
-                .with_default("")
-                .prompt()
-                .map_err(|_| CloneError::UserCancelled)?;
+        // Dry-run: collect rename/content change stats
+        let mut renamed_entries: Vec<(String, String)> = Vec::new();
+        let mut total_files: usize = 0;
+        let mut content_changed: usize = 0;
 
-            if input.trim().is_empty() {
-                break;
-            }
+        for entry in Self::walk_source(&source) {
+            let entry = entry.map_err(|e| CloneError::IoError(
+                std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+            ))?;
+            let entry_path = entry.path();
+            let relative = entry_path
+                .strip_prefix(&source)
+                .map_err(|_| CloneError::InvalidPath(entry_path.display().to_string()))?;
 
-            let path = PathBuf::from(input.trim());
-            if !path.exists() {
-                println!("{}", format!("  ⚠️  Path does not exist: {}", path.display()).yellow());
+            if relative.as_os_str().is_empty() {
                 continue;
             }
 
-            sources.push(path);
-            index += 1;
+            let new_relative = Self::replace_in_path(relative, &replacement_map);
+
+            if new_relative != relative {
+                renamed_entries.push((
+                    relative.display().to_string(),
+                    new_relative.display().to_string(),
+                ));
+            }
+
+            if entry.file_type().map_or(false, |ft| ft.is_file()) {
+                total_files += 1;
+                if Self::is_text_file(entry_path) {
+                    if let Ok(content) = fs::read_to_string(entry_path) {
+                        let new_content = Self::replace_in_string(&content, &replacement_map);
+                        if content != new_content {
+                            content_changed += 1;
+                        }
+                    }
+                }
+            }
         }
 
-        if sources.is_empty() {
-            println!("{}", "❌ No sources specified. Exiting.".red());
+        if !renamed_entries.is_empty() {
+            println!("{}", "  Renamed paths:".blue().bold());
+            let show_count = renamed_entries.len().min(20);
+            for (old_path, new_path) in &renamed_entries[..show_count] {
+                println!("    {} → {}", old_path.yellow(), new_path.green());
+            }
+            if renamed_entries.len() > 20 {
+                println!(
+                    "    {} more ...",
+                    (renamed_entries.len() - 20).to_string().cyan()
+                );
+            }
+            println!();
+        }
+
+        println!(
+            "  {} files, {} with content changes, {} path renames",
+            total_files.to_string().cyan(),
+            content_changed.to_string().cyan(),
+            renamed_entries.len().to_string().cyan()
+        );
+        println!();
+
+        // Check target exists
+        if target.exists() {
+            println!(
+                "{}",
+                format!("  ⚠ Target '{}' already exists!", target.display())
+                    .yellow()
+                    .bold()
+            );
             return Ok(());
         }
 
-        println!();
-        println!("{}", format!("✅ Collected {} source(s)", sources.len()).green().bold());
-        println!();
+        // Step 5: Confirm
+        let confirmed = Confirm::new("Proceed with clone?")
+            .with_default(true)
+            .prompt()
+            .map_err(|_| CloneError::UserCancelled)?;
 
-        // 4. 处理每个源
-        let replacement_map = old_variants.get_replacement_map(&new_variants);
-
-        for (idx, source) in sources.iter().enumerate() {
-            println!("{}", format!("✅ Processing source #{} ...", idx + 1).cyan().bold());
-            println!("   Source: {}", source.display().to_string().yellow());
-
-            let target = Self::get_target_path(source, &replacement_map)?;
-            println!("   Target: {}", target.display().to_string().green());
-            println!();
-
-            // 检查目标是否存在
-            if target.exists() {
-                println!("{}", format!("   ⚠️  Target '{}' already exists!", target.display()).yellow().bold());
-                print!("   Please delete it manually, then press Y to continue (or N to skip): ");
-                io::stdout().flush()?;
-
-                let mut response = String::new();
-                io::stdin().read_line(&mut response)?;
-
-                if !response.trim().eq_ignore_ascii_case("y") {
-                    println!("{}", "   ⏭️  Skipped.".yellow());
-                    println!();
-                    continue;
-                }
-
-                // 再次检查
-                if target.exists() {
-                    println!("{}", "   ❌ Target still exists. Skipping.".red());
-                    println!();
-                    continue;
-                }
-            }
-
-            // 执行克隆
-            if source.is_dir() {
-                Self::clone_directory(source, &target, &replacement_map)?;
-            } else {
-                Self::clone_file(source, &target, &replacement_map)?;
-            }
-
-            println!("{}", "   ✓ Clone completed!".green().bold());
-            println!();
+        if !confirmed {
+            println!("{}", "  Cancelled.".yellow());
+            return Ok(());
         }
 
-        println!("{}", "🎉 All clones completed successfully!".green().bold());
+        // Step 6: Execute clone
+        println!();
+        if source.is_dir() {
+            Self::clone_directory(&source, &target, &replacement_map)?;
+        } else {
+            Self::clone_file(&source, &target, &replacement_map)?;
+        }
+
+        println!();
+        println!("{}", "🎉 Clone completed successfully!".green().bold());
 
         Ok(())
     }
@@ -309,29 +430,29 @@ impl CloneCommand {
     fn clone_directory(source: &Path, target: &Path, replacement_map: &HashMap<String, String>) -> Result<(), CloneError> {
         println!("   📁 Cloning directory...");
 
-        // 创建目标目录
         fs::create_dir_all(target)?;
 
         let mut file_count = 0;
         let mut modified_count = 0;
 
-        // 遍历源目录
-        for entry in WalkDir::new(source).into_iter().filter_entry(|e| Self::should_include(e)) {
-            let entry = entry?;
+        for entry in Self::walk_source(source) {
+            let entry = entry.map_err(|e| CloneError::IoError(
+                std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+            ))?;
             let source_path = entry.path();
 
-            // 计算相对路径
             let relative_path = source_path.strip_prefix(source)
                 .map_err(|_| CloneError::InvalidPath(source_path.display().to_string()))?;
 
-            // 应用替换到相对路径的每个部分
             let new_relative_path = Self::replace_in_path(relative_path, replacement_map);
             let target_path = target.join(new_relative_path);
 
-            if source_path.is_dir() {
+            let is_dir = entry.file_type().map_or(false, |ft| ft.is_dir());
+            let is_file = entry.file_type().map_or(false, |ft| ft.is_file());
+
+            if is_dir {
                 fs::create_dir_all(&target_path)?;
-            } else if source_path.is_file() {
-                // 检查是否是文本文件
+            } else if is_file {
                 if Self::is_text_file(source_path) {
                     let content = fs::read_to_string(source_path)?;
                     let new_content = Self::replace_in_string(&content, replacement_map);
@@ -347,7 +468,6 @@ impl CloneCommand {
                         modified_count += 1;
                     }
                 } else {
-                    // 二进制文件直接复制
                     if let Some(parent) = target_path.parent() {
                         fs::create_dir_all(parent)?;
                     }
@@ -386,7 +506,7 @@ impl CloneCommand {
         Ok(())
     }
 
-    /// 在字符串中替换关键词（完整单词边界匹配）
+    /// 在字符串中替换所有关键词变体
     fn replace_in_string(content: &str, replacement_map: &HashMap<String, String>) -> String {
         let mut result = content.to_string();
 
@@ -395,16 +515,20 @@ impl CloneCommand {
         replacements.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
 
         for (old, new) in replacements {
-            // 手动实现单词边界匹配（不使用 lookahead/lookbehind）
-            result = Self::replace_with_boundary(&result, old, new);
+            if old.contains('-') || old.contains('_') {
+                // 带分隔符的变体（kebab_case, snake_case, SCREAMING_SNAKE）直接替换
+                result = result.replace(old.as_str(), new.as_str());
+            } else {
+                // 无分隔符的变体（PascalCase, camelCase）用智能边界替换
+                result = Self::replace_with_smart_boundary(&result, old, new);
+            }
         }
 
         result
     }
 
-    /// 在字符串中替换关键词，确保单词边界
-    /// 边界定义：分隔符（-_）、空白、或字符串边界
-    fn replace_with_boundary(content: &str, old: &str, new: &str) -> String {
+    /// 智能边界替换：边界 = 非字母数字 或 大小写转换处
+    fn replace_with_smart_boundary(content: &str, old: &str, new: &str) -> String {
         let mut result = String::new();
         let chars: Vec<char> = content.chars().collect();
         let old_chars: Vec<char> = old.chars().collect();
@@ -413,54 +537,37 @@ impl CloneCommand {
 
         let mut i = 0;
         while i < content_len {
-            // 检查是否匹配
-            let mut matches = false;
-            if i + old_len <= content_len {
-                matches = true;
-                for j in 0..old_len {
-                    if chars[i + j] != old_chars[j] {
-                        matches = false;
-                        break;
-                    }
-                }
-            }
-
-            if matches {
-                // 检查前边界
+            if i + old_len <= content_len && chars[i..i + old_len] == old_chars[..] {
                 let before_ok = if i == 0 {
                     true
                 } else {
-                    let prev_char = chars[i - 1];
-                    Self::is_boundary_char(prev_char)
+                    let prev = chars[i - 1];
+                    let curr = chars[i];
+                    !prev.is_alphanumeric()
+                        || (prev.is_lowercase() && curr.is_uppercase())
                 };
 
-                // 检查后边界
                 let after_ok = if i + old_len >= content_len {
                     true
                 } else {
-                    let next_char = chars[i + old_len];
-                    Self::is_boundary_char(next_char)
+                    let last = chars[i + old_len - 1];
+                    let next = chars[i + old_len];
+                    !next.is_alphanumeric()
+                        || (last.is_lowercase() && next.is_uppercase())
                 };
 
                 if before_ok && after_ok {
-                    // 符合边界条件，执行替换
                     result.push_str(new);
                     i += old_len;
                     continue;
                 }
             }
 
-            // 不匹配或不符合边界，保留原字符
             result.push(chars[i]);
             i += 1;
         }
 
         result
-    }
-
-    /// 检查字符是否是边界字符
-    fn is_boundary_char(ch: char) -> bool {
-        ch == '-' || ch == '_' || ch.is_whitespace()
     }
 
     /// 在路径中替换关键词
@@ -479,36 +586,14 @@ impl CloneCommand {
         result
     }
 
-    /// 检查是否应该包含此目录项
-    fn should_include(entry: &walkdir::DirEntry) -> bool {
-        let file_name = entry.file_name().to_str().unwrap_or("");
-
-        // 排除的目录和文件
-        let excluded = [
-            ".git",
-            "node_modules",
-            "target",
-            "build",
-            "dist",
-            ".idea",
-            ".vscode",
-            "__pycache__",
-            ".pytest_cache",
-            ".mypy_cache",
-            "coverage",
-            ".coverage",
-            "*.pyc",
-            "*.pyo",
-            "*.pyd",
-        ];
-
-        for pattern in &excluded {
-            if file_name == *pattern || file_name.ends_with(pattern.trim_start_matches('*')) {
-                return false;
-            }
-        }
-
-        true
+    /// Walk source directory respecting .gitignore
+    fn walk_source(source: &Path) -> ignore::Walk {
+        WalkBuilder::new(source)
+            .hidden(true)
+            .git_ignore(true)
+            .git_global(true)
+            .git_exclude(true)
+            .build()
     }
 
     /// 检查是否是文本文件
@@ -540,5 +625,37 @@ impl CloneCommand {
         }
 
         false
+    }
+
+    /// Glob match: * matches any chars, ? matches one char (case-insensitive)
+    fn glob_match(pattern: &str, name: &str) -> bool {
+        let p: Vec<char> = pattern.to_lowercase().chars().collect();
+        let n: Vec<char> = name.to_lowercase().chars().collect();
+        let (plen, nlen) = (p.len(), n.len());
+
+        // dp[i][j] = pattern[..i] matches name[..j]
+        let mut dp = vec![vec![false; nlen + 1]; plen + 1];
+        dp[0][0] = true;
+
+        // Leading *s can match empty
+        for i in 1..=plen {
+            if p[i - 1] == '*' {
+                dp[i][0] = dp[i - 1][0];
+            } else {
+                break;
+            }
+        }
+
+        for i in 1..=plen {
+            for j in 1..=nlen {
+                if p[i - 1] == '*' {
+                    dp[i][j] = dp[i - 1][j] || dp[i][j - 1];
+                } else if p[i - 1] == '?' || p[i - 1] == n[j - 1] {
+                    dp[i][j] = dp[i - 1][j - 1];
+                }
+            }
+        }
+
+        dp[plen][nlen]
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "yo"
-version = "1.1.39"
+version = "1.1.41"
 edition = "2021"
 authors = ["Your Name <you@example.com>"]
 description = "A multi-functional command-line tool with GitHub SSH key management and SOCKS5 proxy"
@@ -61,6 +61,8 @@ chrono = { version = "0.4", features = ["serde"] }
 inquire = "0.9"
 # Directory walking
 walkdir = "2.5"
+# Gitignore-aware directory walking
+ignore = "0.4"
 # CLI argument parsing
 clap = { version = "4", features = ["derive"] }
 # Home directory detection

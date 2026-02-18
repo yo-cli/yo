@@ -52,29 +52,7 @@ jobs:
           fi
           echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
 
-  # Windows build (yo-auto) - always run
-  build-windows:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Build yo-auto (with audio support)
-        run: cargo build --release --bin yo-auto --features audio
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: yo-auto-windows
-          path: target/release/yo-auto.exe
-          if-no-files-found: error
-
-  # Linux musl build (yo-git + yo-s5 + yo-ob) - always run
+  # Linux musl build (yo-git + yo-s5 + yo-ob + yo-file) - always run
   build-linux:
     runs-on: ubuntu-latest
     steps:
@@ -93,10 +71,10 @@ jobs:
 
       - name: Build Linux binaries
         run: |
-          cargo build --release --target x86_64-unknown-linux-musl --no-default-features --bin yo-git
-          cargo build --release --target x86_64-unknown-linux-musl --no-default-features --bin yo-s5
-          cargo build --release --target x86_64-unknown-linux-musl --no-default-features --bin yo-file
-          cargo build --release --target x86_64-unknown-linux-musl --no-default-features --bin yo-ob
+          cargo build --release --target x86_64-unknown-linux-musl --bin yo-git
+          cargo build --release --target x86_64-unknown-linux-musl --bin yo-s5
+          cargo build --release --target x86_64-unknown-linux-musl --bin yo-file
+          cargo build --release --target x86_64-unknown-linux-musl --bin yo-ob
 
       - name: Upload yo-git
         uses: actions/upload-artifact@v4
@@ -128,7 +106,7 @@ jobs:
 
   # Dev release (every push to dev) - prerelease
   release-dev:
-    needs: [check-version, build-windows, build-linux]
+    needs: [check-version, build-linux]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -183,15 +161,8 @@ jobs:
             # yo-ob (OceanBase tool)
             curl -fsSL -o yo-ob https://github.com/${{ github.repository }}/releases/download/v${{ needs.check-version.outputs.version }}-dev/yo-ob && chmod +x yo-ob
             ```
-
-            **Windows (download as `yo.exe`):**
-            ```bash
-            # yo-auto (Task scheduler with TTS)
-            curl -fsSL -o yo.exe https://github.com/${{ github.repository }}/releases/download/v${{ needs.check-version.outputs.version }}-dev/yo-auto.exe
-            ```
           prerelease: true
           files: |
-            artifacts/yo-auto-windows/yo-auto.exe
             artifacts/yo-git-linux/yo-git
             artifacts/yo-s5-linux/yo-s5
             artifacts/yo-file-linux/yo-file
@@ -225,7 +196,7 @@ jobs:
 
   # Stable release (only when version changed) - merge to main
   release-stable:
-    needs: [check-version, build-windows, build-linux]
+    needs: [check-version, build-linux]
     if: needs.check-version.outputs.version_changed == 'true'
     runs-on: ubuntu-latest
     steps:
@@ -282,18 +253,11 @@ jobs:
             curl -fsSL -o yo-ob https://github.com/${{ github.repository }}/releases/download/v${{ needs.check-version.outputs.version }}/yo-ob && chmod +x yo-ob
             ```
 
-            **Windows (download as `yo.exe`):**
-            ```bash
-            # yo-auto (Task scheduler with TTS)
-            curl -fsSL -o yo.exe https://github.com/${{ github.repository }}/releases/download/v${{ needs.check-version.outputs.version }}/yo-auto.exe
-            ```
-
             ---
 
           generate_release_notes: true
           prerelease: false
           files: |
-            artifacts/yo-auto-windows/yo-auto.exe
             artifacts/yo-git-linux/yo-git
             artifacts/yo-s5-linux/yo-s5
             artifacts/yo-file-linux/yo-file
