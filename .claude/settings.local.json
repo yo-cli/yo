@@ -87,7 +87,12 @@
       "WebFetch(domain:ui.shadcn.com)",
       "Bash(dotnet run:*)",
       "Bash(git -C /mnt/d/code/ydcode/yo log --oneline --all)",
-      "Bash(git -C /mnt/d/code/ydcode/yo branch -a)"
+      "Bash(git -C /mnt/d/code/ydcode/yo branch -a)",
+      "Bash(gh api:*)",
+      "Bash(gh auth:*)",
+      "Bash(wait)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)"
     ],
     "deny": [],
     "ask": []
