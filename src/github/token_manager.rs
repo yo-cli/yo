@@ -20,6 +20,8 @@ pub enum TokenError {
     DirectoryError(String),
     #[error("Failed to create token file: {0}")]
     FileCreateError(String),
+    #[error("Failed to delete token file: {0}")]
+    DeleteError(String),
     #[error("HOME environment variable not set")]
     HomeNotSet,
     #[error("IO error: {0}")]
@@ -137,6 +139,16 @@ impl GitHubTokenManager {
         // 设置安全权限
         Self::set_secure_permissions(&token_path, false)?;
 
+        Ok(())
+    }
+
+    /// Delete the saved token
+    pub fn delete_token(username: &str) -> Result<(), TokenError> {
+        let token_path = Self::get_token_path(username)?;
+        if token_path.exists() {
+            fs::remove_file(&token_path)
+                .map_err(|e| TokenError::DeleteError(format!("{}", e)))?;
+        }
         Ok(())
     }
 }

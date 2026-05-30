@@ -1,10 +1,10 @@
-use crate::github::api_client::GitHubAPIClient;
+use crate::github::api_client::{GitHubAPIClient, RepoInfo as ApiRepoInfo};
 use crate::github::ssh_key_manager::SSHKeyManager;
 use crate::github::token_manager::GitHubTokenManager;
 use chrono::Local;
 use colored::Colorize;
 use hostname;
-use inquire::Select;
+use inquire::{Confirm, Select};
 use regex::Regex;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -199,6 +199,163 @@ impl GitHubInitCommand {
         }
     }
 
+    /// Obtain and verify a token, check repository access, and return a usable API client.
+    ///
+    /// - Reuses a saved token, or prompts for one (a freshly entered token is
+    ///   persisted only after it verifies, so a bad token cannot block later runs).
+    /// - On token verification failure (only when reusing a saved token) or on
+    ///   repository access failure, prints a recovery hint and asks whether to
+    ///   delete the saved token and re-enter it; retries if the user agrees.
+    fn prepare_authenticated_client(
+        repo_info: &RepoInfo,
+        is_https: bool,
+    ) -> Result<(GitHubAPIClient, ApiRepoInfo, String), InitError> {
+        loop {
+            // Obtain the token: reuse the saved one, otherwise prompt (do not persist yet)
+            let (token, used_saved_token) = if GitHubTokenManager::has_token(&repo_info.username) {
+                println!(
+                    "{}",
+                    format!("ℹ Using saved token for @{}", repo_info.username)
+                        .blue()
+                        .bold()
+                );
+                let token = GitHubTokenManager::get_token(&repo_info.username)
+                    .map_err(|e| InitError::TokenRetrievalFailed(format!("{}", e)))?;
+                (token, true)
+            } else {
+                let token = if is_https {
+                    Self::prompt_for_token_https(&repo_info.username)?
+                } else {
+                    Self::prompt_for_token(&repo_info.username)?
+                };
+                (token, false)
+            };
+
+            // Verify the token and fetch the user info
+            println!("{}", "ℹ Verifying GitHub token...".blue().bold());
+            let api_client = GitHubAPIClient::new(token.clone())
+                .map_err(|e| InitError::TokenVerificationFailed(format!("{}", e)))?;
+
+            let user_info = match api_client.verify_token() {
+                Ok(user_info) => user_info,
+                Err(e) => {
+                    // Only a reused saved token is on disk here (a fresh one is not persisted yet)
+                    if used_saved_token {
+                        let diagnostic = format!(
+                            "⚠ The saved token for @{} is invalid or lacks required permissions ({}).",
+                            repo_info.username, e
+                        );
+                        if Self::offer_delete_and_retry(repo_info, &diagnostic) {
+                            GitHubTokenManager::delete_token(&repo_info.username)
+                                .map_err(|de| InitError::TokenRetrievalFailed(format!("{}", de)))?;
+                            continue;
+                        }
+                    }
+                    return Err(InitError::TokenVerificationFailed(format!("{}", e)));
+                }
+            };
+
+            println!(
+                "{}",
+                format!("✓ Token verified for user: {}", user_info.get_login())
+                    .green()
+                    .bold()
+            );
+
+            // Persist a freshly entered token only after it verifies
+            if !used_saved_token {
+                GitHubTokenManager::save_token(&repo_info.username, &token)
+                    .map_err(|e| InitError::TokenSaveFailed(format!("{}", e)))?;
+                println!(
+                    "{}",
+                    format!("✓ Token saved to ~/.yo/github/{}/token", repo_info.username)
+                        .green()
+                        .bold()
+                );
+            }
+
+            // Check repository access
+            println!(
+                "{}",
+                format!(
+                    "ℹ Checking repository access for {}/{}...",
+                    repo_info.username, repo_info.repository
+                )
+                .blue()
+                .bold()
+            );
+
+            match api_client.get_repository_info(&repo_info.username, &repo_info.repository) {
+                Ok(repo_info_result) => {
+                    println!(
+                        "{}",
+                        format!(
+                            "✓ Repository access confirmed (permissions: {})",
+                            repo_info_result.get_permission_level()
+                        )
+                        .green()
+                        .bold()
+                    );
+                    return Ok((api_client, repo_info_result, token));
+                }
+                Err(e) => {
+                    // The token is necessarily on disk here (reused or just persisted), so always offer recovery
+                    let login = user_info.get_login();
+                    let diagnostic = [
+                        format!(
+                            "⚠ Could not access {0}/{1} with the saved token for @{0} (authenticated as {2}).",
+                            repo_info.username, repo_info.repository, login
+                        ),
+                        "  Possible causes:".to_string(),
+                        "   1) The repository name is wrong or it does not exist".to_string(),
+                        format!(
+                            "   2) This token's account ({}) has no access to {}/{}",
+                            login, repo_info.username, repo_info.repository
+                        ),
+                        format!(
+                            "   3) The saved token for @{} is wrong (e.g. mistyped earlier)",
+                            repo_info.username
+                        ),
+                    ]
+                    .join("\n");
+                    if Self::offer_delete_and_retry(repo_info, &diagnostic) {
+                        GitHubTokenManager::delete_token(&repo_info.username)
+                            .map_err(|de| InitError::TokenRetrievalFailed(format!("{}", de)))?;
+                        continue;
+                    }
+                    return Err(InitError::RepositoryAccessFailed(format!("{}", e)));
+                }
+            }
+        }
+    }
+
+    /// Print a recovery hint for a bad saved token and ask whether to delete it and re-enter.
+    /// Returns true if the user chose to delete and retry.
+    fn offer_delete_and_retry(repo_info: &RepoInfo, diagnostic: &str) -> bool {
+        println!("{}", diagnostic.yellow().bold());
+        println!(
+            "{}",
+            format!(
+                "ℹ Saved token (encrypted): ~/.yo/github/{}/token",
+                repo_info.username
+            )
+            .blue()
+        );
+        println!(
+            "{}",
+            format!(
+                "ℹ To switch tokens manually later: rm ~/.yo/github/{0}/token && yo init @{0}/{1}",
+                repo_info.username, repo_info.repository
+            )
+            .blue()
+        );
+
+        Confirm::new("Delete the saved token and enter a new one now?")
+            .with_default(false)
+            .prompt()
+            .unwrap_or(false)
+    }
+
     /// 执行 SSH Deploy Key 模式
     fn execute_ssh(repo_info: RepoInfo) -> Result<(), InitError> {
 
@@ -212,78 +369,10 @@ impl GitHubInitCommand {
             .bold()
         );
 
-        // 检查 token 是否存在,如果不存在则提示输入
-        let token = if GitHubTokenManager::has_token(&repo_info.username) {
-            println!(
-                "{}",
-                format!("ℹ Using saved token for @{}", repo_info.username)
-                    .blue()
-                    .bold()
-            );
-            GitHubTokenManager::get_token(&repo_info.username)
-                .map_err(|e| InitError::TokenRetrievalFailed(format!("{}", e)))?
-        } else {
-            let token = Self::prompt_for_token(&repo_info.username)?;
+        let (api_client, repo_info_result, _) =
+            Self::prepare_authenticated_client(&repo_info, false)?;
 
-            // 保存 token
-            GitHubTokenManager::save_token(&repo_info.username, &token)
-                .map_err(|e| InitError::TokenSaveFailed(format!("{}", e)))?;
-
-            println!(
-                "{}",
-                format!(
-                    "✓ Token saved to ~/.yo/github/{}/token",
-                    repo_info.username
-                )
-                .green()
-                .bold()
-            );
-
-            token
-        };
-
-        // 验证 token 并获取用户信息
-        println!("{}", "ℹ Verifying GitHub token...".blue().bold());
-        let api_client = GitHubAPIClient::new(token)
-            .map_err(|e| InitError::TokenVerificationFailed(format!("{}", e)))?;
-
-        let user_info = api_client
-            .verify_token()
-            .map_err(|e| InitError::TokenVerificationFailed(format!("{}", e)))?;
-
-        println!(
-            "{}",
-            format!("✓ Token verified for user: {}", user_info.get_login())
-                .green()
-                .bold()
-        );
-
-        // 检查仓库访问权限
-        println!(
-            "{}",
-            format!(
-                "ℹ Checking repository access for {}/{}...",
-                repo_info.username, repo_info.repository
-            )
-            .blue()
-            .bold()
-        );
-
-        let repo_info_result = api_client
-            .get_repository_info(&repo_info.username, &repo_info.repository)
-            .map_err(|e| InitError::RepositoryAccessFailed(format!("{}", e)))?;
-
-        println!(
-            "{}",
-            format!(
-                "✓ Repository access confirmed (permissions: {})",
-                repo_info_result.get_permission_level()
-            )
-            .green()
-            .bold()
-        );
-
-        // 检查是否有足够的权限
+        // Ensure we have sufficient permissions
         if repo_info_result.get_permission_level() == "read" {
             return Err(InitError::InsufficientPermissions);
         }
@@ -403,78 +492,9 @@ impl GitHubInitCommand {
             .bold()
         );
 
-        // 检查 token 是否存在,如果不存在则提示输入
-        let token = if GitHubTokenManager::has_token(&repo_info.username) {
-            println!(
-                "{}",
-                format!("ℹ Using saved token for @{}", repo_info.username)
-                    .blue()
-                    .bold()
-            );
-            GitHubTokenManager::get_token(&repo_info.username)
-                .map_err(|e| InitError::TokenRetrievalFailed(format!("{}", e)))?
-        } else {
-            let token = Self::prompt_for_token_https(&repo_info.username)?;
+        let (_, _, token) = Self::prepare_authenticated_client(&repo_info, true)?;
 
-            // 保存 token
-            GitHubTokenManager::save_token(&repo_info.username, &token)
-                .map_err(|e| InitError::TokenSaveFailed(format!("{}", e)))?;
-
-            println!(
-                "{}",
-                format!(
-                    "✓ Token saved to ~/.yo/github/{}/token",
-                    repo_info.username
-                )
-                .green()
-                .bold()
-            );
-
-            token
-        };
-
-        // 验证 token 并获取用户信息
-        println!("{}", "ℹ Verifying GitHub token...".blue().bold());
-        let api_client = GitHubAPIClient::new(token.clone())
-            .map_err(|e| InitError::TokenVerificationFailed(format!("{}", e)))?;
-
-        let user_info = api_client
-            .verify_token()
-            .map_err(|e| InitError::TokenVerificationFailed(format!("{}", e)))?;
-
-        println!(
-            "{}",
-            format!("✓ Token verified for user: {}", user_info.get_login())
-                .green()
-                .bold()
-        );
-
-        // 检查仓库访问权限
-        println!(
-            "{}",
-            format!(
-                "ℹ Checking repository access for {}/{}...",
-                repo_info.username, repo_info.repository
-            )
-            .blue()
-            .bold()
-        );
-
-        let repo_info_result = api_client
-            .get_repository_info(&repo_info.username, &repo_info.repository)
-            .map_err(|e| InitError::RepositoryAccessFailed(format!("{}", e)))?;
-
-        println!(
-            "{}",
-            format!(
-                "✓ Repository access confirmed (permissions: {})",
-                repo_info_result.get_permission_level()
-            )
-            .green()
-            .bold()
-        );
-
-        // 配置 git credential helper
+        // Configure the git credential helper
         println!("{}", "ℹ Configuring git credentials...".blue().bold());
         Self::configure_git_credentials(&token, &repo_info.username, &repo_info.repository)?;
 
