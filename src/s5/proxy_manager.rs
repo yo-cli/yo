@@ -162,18 +162,15 @@ impl S5ProxyManager {
 
     /// 显示代理配置
     fn display_proxy_configuration(config: &ProxyConfig) {
-        let socks5_url = format!("socks5://admin:{}@{}:{}", config.password, config.public_ip, config.port);
-        let http_url = format!("http://admin:{}@{}:{}", config.password, config.public_ip, config.port);
         println!();
         println!("{}", "SOCKS5 + HTTP Proxy Configuration (same port):".green().bold());
         println!("{}", "{".cyan());
         println!("{}", "  \"type\": \"socks5+http\",".cyan());
         println!("  \"IP\": \"{}\",", config.public_ip.cyan().bold());
         println!("  \"port\": {},", config.port.to_string().cyan().bold());
+        println!("  \"httpPort\": {},", config.port.to_string().cyan().bold());
         println!("  \"username\": \"{}\",", "admin".cyan().bold());
-        println!("  \"password\": \"{}\",", config.password.cyan().bold());
-        println!("  \"socks5\": \"{}\",", socks5_url.cyan().bold());
-        println!("  \"http\": \"{}\"", http_url.cyan().bold());
+        println!("  \"password\": \"{}\"", config.password.cyan().bold());
         println!("{}", "}".cyan());
         println!();
     }
