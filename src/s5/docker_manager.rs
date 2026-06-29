@@ -180,7 +180,7 @@ impl S5DockerManager {
     /// 拉取 GOST 镜像
     pub fn pull_gost_image() -> Result<(), DockerError> {
         println!("{}", "ℹ Pulling GOST image...".blue().bold());
-        Self::execute_command_silent("docker pull gogost/gost > /dev/null 2>&1")
+        Self::execute_command_silent("docker pull gogost/gost:3 > /dev/null 2>&1")
             .map_err(|_| DockerError::ImagePullFailed)
     }
 
@@ -190,10 +190,11 @@ impl S5DockerManager {
         port: u16,
         password: &str,
     ) -> Result<(), DockerError> {
-        println!("{}", "ℹ Starting GOST SOCKS5 proxy...".blue().bold());
+        println!("{}", "ℹ Starting GOST proxy (SOCKS5 + HTTP on the same port)...".blue().bold());
 
+        // auto:// multiplexes SOCKS5 and HTTP CONNECT on a single port (requires GOST v3).
         let command = format!(
-            "docker run -d --name {} -p {}:{} gogost/gost -L \"socks5://admin:{}@:{}\" > /dev/null 2>&1",
+            "docker run -d --name {} -p {}:{} gogost/gost:3 -L \"auto://admin:{}@:{}\" > /dev/null 2>&1",
             container_name, port, port, password, port
         );
 

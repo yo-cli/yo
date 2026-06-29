@@ -48,9 +48,9 @@ impl S5ProxyManager {
         }
 
         if interactive {
-            println!("{}", "Setting up SOCKS5 proxy with GOST (Interactive Mode)...".cyan().bold());
+            println!("{}", "Setting up SOCKS5 + HTTP proxy with GOST (Interactive Mode)...".cyan().bold());
         } else {
-            println!("{}", "Setting up SOCKS5 proxy with GOST (Automatic Mode)...".cyan().bold());
+            println!("{}", "Setting up SOCKS5 + HTTP proxy with GOST (Automatic Mode)...".cyan().bold());
         }
 
         // 确保 Docker 可用
@@ -162,30 +162,42 @@ impl S5ProxyManager {
 
     /// 显示代理配置
     fn display_proxy_configuration(config: &ProxyConfig) {
+        let socks5_url = format!("socks5://admin:{}@{}:{}", config.password, config.public_ip, config.port);
+        let http_url = format!("http://admin:{}@{}:{}", config.password, config.public_ip, config.port);
         println!();
-        println!("{}", "SOCKS5 Proxy Configuration:".green().bold());
+        println!("{}", "SOCKS5 + HTTP Proxy Configuration (same port):".green().bold());
         println!("{}", "{".cyan());
-        println!("{}", "  \"type\": \"socks5\",".cyan());
+        println!("{}", "  \"type\": \"socks5+http\",".cyan());
         println!("  \"IP\": \"{}\",", config.public_ip.cyan().bold());
         println!("  \"port\": {},", config.port.to_string().cyan().bold());
         println!("  \"username\": \"{}\",", "admin".cyan().bold());
-        println!("  \"password\": \"{}\"", config.password.cyan().bold());
+        println!("  \"password\": \"{}\",", config.password.cyan().bold());
+        println!("  \"socks5\": \"{}\",", socks5_url.cyan().bold());
+        println!("  \"http\": \"{}\"", http_url.cyan().bold());
         println!("{}", "}".cyan());
         println!();
     }
 
-    /// 测试代理连接
+    /// 测试代理连接（SOCKS5 与 HTTP 共用同一端口，两者都需通过）
     fn test_proxy_connectivity(config: &ProxyConfig) -> Result<(), ProxyError> {
         println!("{}", "ℹ Testing SOCKS5 connectivity...".blue().bold());
-
         S5NetworkUtils::test_socks5_connectivity(&config.public_ip, config.port, "admin", &config.password)
             .map_err(|_| {
                 println!("{}", "✗ SOCKS5 proxy connectivity test failed".red().bold());
                 println!("{}", "ℹ   This might be due to network restrictions or proxy configuration issues".blue().bold());
-                ProxyError::ConfigurationFailed("Connectivity test failed".to_string())
+                ProxyError::ConfigurationFailed("SOCKS5 connectivity test failed".to_string())
             })?;
-
         println!("{}", "✓ SOCKS5 proxy connectivity test passed".green().bold());
+
+        println!("{}", "ℹ Testing HTTP connectivity (same port)...".blue().bold());
+        S5NetworkUtils::test_http_connectivity(&config.public_ip, config.port, "admin", &config.password)
+            .map_err(|_| {
+                println!("{}", "✗ HTTP proxy connectivity test failed".red().bold());
+                println!("{}", "ℹ   This might be due to network restrictions or proxy configuration issues".blue().bold());
+                ProxyError::ConfigurationFailed("HTTP connectivity test failed".to_string())
+            })?;
+        println!("{}", "✓ HTTP proxy connectivity test passed".green().bold());
+
         Ok(())
     }
 }

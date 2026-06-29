@@ -16,7 +16,7 @@ fn show_usage() {
     println!("  -v, --version          Show version information");
     println!("  -i, --interactive      Start in interactive mode");
     println!();
-    println!("Without options, starts SOCKS5 proxy in automatic mode.");
+    println!("Without options, starts SOCKS5 + HTTP proxy (same port) in automatic mode.");
 }
 
 fn main() {

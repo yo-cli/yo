@@ -110,6 +110,27 @@ impl S5NetworkUtils {
         username: &str,
         password: &str,
     ) -> Result<(), NetworkError> {
+        Self::probe_proxy("socks5", host, port, username, password)
+    }
+
+    /// Test the HTTP CONNECT proxy (shares the SOCKS5 port via GOST auto://)
+    pub fn test_http_connectivity(
+        host: &str,
+        port: u16,
+        username: &str,
+        password: &str,
+    ) -> Result<(), NetworkError> {
+        Self::probe_proxy("http", host, port, username, password)
+    }
+
+    /// Probe proxy reachability by curling httpbin through the given proxy scheme
+    fn probe_proxy(
+        scheme: &str,
+        host: &str,
+        port: u16,
+        username: &str,
+        password: &str,
+    ) -> Result<(), NetworkError> {
         // 创建临时目录
         fs::create_dir_all("/tmp/claude")?;
 
@@ -118,8 +139,8 @@ impl S5NetworkUtils {
         let mut file = fs::File::create(config_file)?;
         writeln!(
             file,
-            "proxy = \"socks5://{}:{}@{}:{}\"",
-            username, password, host, port
+            "proxy = \"{}://{}:{}@{}:{}\"",
+            scheme, username, password, host, port
         )?;
         writeln!(file, "connect-timeout = 10")?;
         writeln!(file, "max-time = 15")?;
