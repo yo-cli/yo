@@ -165,7 +165,7 @@ impl S5ProxyManager {
         println!();
         println!("{}", "SOCKS5 + HTTP Proxy Configuration (same port):".green().bold());
         println!("{}", "{".cyan());
-        println!("{}", "  \"type\": \"socks5+http\",".cyan());
+        println!("{}", "  \"type\": \"socks5\",".cyan());
         println!("  \"IP\": \"{}\",", config.public_ip.cyan().bold());
         println!("  \"port\": {},", config.port.to_string().cyan().bold());
         println!("  \"httpPort\": {},", config.port.to_string().cyan().bold());
