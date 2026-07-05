@@ -2,6 +2,7 @@
 
 pub mod commands;
 pub mod common;
+pub mod forward;
 pub mod github;
 pub mod ob;
 pub mod s5;

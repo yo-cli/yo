@@ -75,6 +75,7 @@ jobs:
           cargo build --release --target x86_64-unknown-linux-musl --bin yo-s5
           cargo build --release --target x86_64-unknown-linux-musl --bin yo-file
           cargo build --release --target x86_64-unknown-linux-musl --bin yo-ob
+          cargo build --release --target x86_64-unknown-linux-musl --bin yo-forward
 
       - name: Upload yo-git
         uses: actions/upload-artifact@v4
@@ -102,6 +103,13 @@ jobs:
         with:
           name: yo-ob-linux
           path: target/x86_64-unknown-linux-musl/release/yo-ob
+          if-no-files-found: error
+
+      - name: Upload yo-forward
+        uses: actions/upload-artifact@v4
+        with:
+          name: yo-forward-linux
+          path: target/x86_64-unknown-linux-musl/release/yo-forward
           if-no-files-found: error
 
   # Dev release (every push to dev) - prerelease
@@ -160,6 +168,9 @@ jobs:
 
             # yo-ob (OceanBase tool)
             curl -fsSL -o yo-ob https://github.com/${{ github.repository }}/releases/download/v${{ needs.check-version.outputs.version }}-dev/yo-ob && chmod +x yo-ob
+
+            # yo-forward (local forward-proxy client)
+            curl -fsSL -o yo-forward https://github.com/${{ github.repository }}/releases/download/v${{ needs.check-version.outputs.version }}-dev/yo-forward && chmod +x yo-forward
             ```
           prerelease: true
           files: |
@@ -167,6 +178,7 @@ jobs:
             artifacts/yo-s5-linux/yo-s5
             artifacts/yo-file-linux/yo-file
             artifacts/yo-ob-linux/yo-ob
+            artifacts/yo-forward-linux/yo-forward
 
       # Publish yo-git to sf-express repo (public, no auth required to download)
       - name: Publish yo-git to sf-express (dev)
@@ -251,6 +263,9 @@ jobs:
 
             # yo-ob (OceanBase tool)
             curl -fsSL -o yo-ob https://github.com/${{ github.repository }}/releases/download/v${{ needs.check-version.outputs.version }}/yo-ob && chmod +x yo-ob
+
+            # yo-forward (local forward-proxy client)
+            curl -fsSL -o yo-forward https://github.com/${{ github.repository }}/releases/download/v${{ needs.check-version.outputs.version }}/yo-forward && chmod +x yo-forward
             ```
 
             ---
@@ -262,6 +277,7 @@ jobs:
             artifacts/yo-s5-linux/yo-s5
             artifacts/yo-file-linux/yo-file
             artifacts/yo-ob-linux/yo-ob
+            artifacts/yo-forward-linux/yo-forward
 
       # Publish yo-git to sf-express repo (public, no auth required to download)
       - name: Publish yo-git to sf-express (stable)

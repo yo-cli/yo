@@ -1,6 +1,6 @@
 [package]
 name = "yo"
-version = "1.1.46"
+version = "1.1.47"
 edition = "2021"
 authors = ["Your Name <you@example.com>"]
 description = "A multi-functional command-line tool with GitHub SSH key management and SOCKS5 proxy"
@@ -29,6 +29,11 @@ path = "src/bin/yo_file.rs"
 [[bin]]
 name = "yo-ob"
 path = "src/bin/yo_ob.rs"
+
+# Binary: Local forward-proxy client (WSL2 / Linux)
+[[bin]]
+name = "yo-forward"
+path = "src/bin/yo_forward.rs"
 
 [dependencies]
 # Async runtime

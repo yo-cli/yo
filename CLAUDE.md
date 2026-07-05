@@ -4,12 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`yo` is a multi-functional CLI tool suite written in Rust (edition 2021). It consists of 4 independent binaries sharing a common library (`yo_lib`):
+`yo` is a multi-functional CLI tool suite written in Rust (edition 2021). It consists of 5 independent binaries sharing a common library (`yo_lib`):
 
 - **yo-git** — GitHub SSH key management (Linux)
 - **yo-file** — File utilities and template cloning
 - **yo-s5** — SOCKS5 proxy service via Docker (Linux)
 - **yo-ob** — OceanBase environment preparation (Linux)
+- **yo-forward** — Local forward-proxy client: route traffic through an upstream SOCKS5 (WSL2/Linux)
 
 Product specs for each tool live in `specs/`.
 
@@ -21,6 +22,7 @@ cargo build --release --bin yo-git
 cargo build --release --bin yo-file
 cargo build --release --bin yo-s5
 cargo build --release --bin yo-ob
+cargo build --release --bin yo-forward
 
 # Check all code compiles
 cargo check
@@ -42,6 +44,7 @@ src/
 ├── github/             # GitHub API client, SSH key gen, encrypted token storage
 ├── ob/                 # OceanBase commands and config
 ├── s5/                 # SOCKS5 Docker/proxy management
+├── forward/            # Local forward-proxy client (gost + systemd + shell env)
 └── common/             # Shared crypto utilities (AES-256-CBC)
 ```
 
