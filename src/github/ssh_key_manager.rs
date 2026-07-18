@@ -83,18 +83,31 @@ impl SSHKeyManager {
         Ok(())
     }
 
-    /// 执行命令
-    fn execute_command(command: &str) -> Result<(), SSHError> {
-        let status = if cfg!(target_os = "windows") {
-            Command::new("cmd").args(&["/C", command]).status()
-        } else {
-            Command::new("sh").args(&["-c", command]).status()
-        };
+    /// Run ssh-keygen directly (no shell), so the same code works on Unix and
+    /// Windows (cmd.exe has no /dev/null and chokes on POSIX redirection).
+    fn run_ssh_keygen(private_key_path: &Path, comment: &str) -> Result<(), SSHError> {
+        let output = Command::new("ssh-keygen")
+            .arg("-t")
+            .arg("ed25519")
+            .arg("-f")
+            .arg(private_key_path)
+            .arg("-N")
+            .arg("")
+            .arg("-C")
+            .arg(comment)
+            .output();
 
-        match status {
-            Ok(status) if status.success() => Ok(()),
-            Ok(_) => Err(SSHError::CommandFailed(command.to_string())),
-            Err(e) => Err(SSHError::CommandFailed(format!("{}: {}", command, e))),
+        match output {
+            Ok(output) if output.status.success() => Ok(()),
+            Ok(output) => Err(SSHError::CommandFailed(format!(
+                "ssh-keygen exited with {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ))),
+            Err(e) => Err(SSHError::CommandFailed(format!(
+                "failed to run ssh-keygen (is it installed and on PATH?): {}",
+                e
+            ))),
         }
     }
 
@@ -155,14 +168,10 @@ impl SSHKeyManager {
         }
 
         // 生成 Ed25519 密钥对
-        let command = format!(
-            "ssh-keygen -t ed25519 -f \"{}\" -N \"\" -C \"yo-github-{}-{}\" > /dev/null 2>&1",
-            private_key_path.display(),
-            username,
-            repo
-        );
-
-        Self::execute_command(&command)?;
+        Self::run_ssh_keygen(
+            &private_key_path,
+            &format!("yo-github-{}-{}", username, repo),
+        )?;
 
         // 设置安全权限
         Self::set_secure_permissions(&private_key_path, false)?;
