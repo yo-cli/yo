@@ -52,7 +52,7 @@ jobs:
           fi
           echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
 
-  # Linux musl build (yo-git + yo-s5 + yo-ob + yo-file) - always run
+  # Linux musl build (yo-git + yo-s5 + yo-file + yo-ob + yo-s3) - always run
   build-linux:
     runs-on: ubuntu-latest
     steps:
@@ -69,13 +69,18 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      # Unit tests live in the library (src/s3/*), so --lib covers them all
+      # without rebuilding the six binaries on the host target.
+      - name: Run tests
+        run: cargo test --lib
+
       - name: Build Linux binaries
         run: |
           cargo build --release --target x86_64-unknown-linux-musl --bin yo-git
           cargo build --release --target x86_64-unknown-linux-musl --bin yo-s5
           cargo build --release --target x86_64-unknown-linux-musl --bin yo-file
           cargo build --release --target x86_64-unknown-linux-musl --bin yo-ob
-          cargo build --release --target x86_64-unknown-linux-musl --bin yo-forward
+          cargo build --release --target x86_64-unknown-linux-musl --bin yo-s3
 
       - name: Upload yo-git
         uses: actions/upload-artifact@v4
@@ -105,11 +110,11 @@ jobs:
           path: target/x86_64-unknown-linux-musl/release/yo-ob
           if-no-files-found: error
 
-      - name: Upload yo-forward
+      - name: Upload yo-s3
         uses: actions/upload-artifact@v4
         with:
-          name: yo-forward-linux
-          path: target/x86_64-unknown-linux-musl/release/yo-forward
+          name: yo-s3-linux
+          path: target/x86_64-unknown-linux-musl/release/yo-s3
           if-no-files-found: error
 
   # Dev release (every push to dev) - prerelease
@@ -169,8 +174,8 @@ jobs:
             # yo-ob (OceanBase tool)
             curl -fsSL -o yo-ob https://github.com/${{ github.repository }}/releases/download/v${{ needs.check-version.outputs.version }}-dev/yo-ob && chmod +x yo-ob
 
-            # yo-forward (local forward-proxy client)
-            curl -fsSL -o yo-forward https://github.com/${{ github.repository }}/releases/download/v${{ needs.check-version.outputs.version }}-dev/yo-forward && chmod +x yo-forward
+            # yo-s3 (budget-controlled AWS cost burner)
+            curl -fsSL -o yo-s3 https://github.com/${{ github.repository }}/releases/download/v${{ needs.check-version.outputs.version }}-dev/yo-s3 && chmod +x yo-s3
             ```
           prerelease: true
           files: |
@@ -178,7 +183,7 @@ jobs:
             artifacts/yo-s5-linux/yo-s5
             artifacts/yo-file-linux/yo-file
             artifacts/yo-ob-linux/yo-ob
-            artifacts/yo-forward-linux/yo-forward
+            artifacts/yo-s3-linux/yo-s3
 
       # Publish yo-git to sf-express repo (public, no auth required to download)
       - name: Publish yo-git to sf-express (dev)
@@ -264,8 +269,8 @@ jobs:
             # yo-ob (OceanBase tool)
             curl -fsSL -o yo-ob https://github.com/${{ github.repository }}/releases/download/v${{ needs.check-version.outputs.version }}/yo-ob && chmod +x yo-ob
 
-            # yo-forward (local forward-proxy client)
-            curl -fsSL -o yo-forward https://github.com/${{ github.repository }}/releases/download/v${{ needs.check-version.outputs.version }}/yo-forward && chmod +x yo-forward
+            # yo-s3 (budget-controlled AWS cost burner)
+            curl -fsSL -o yo-s3 https://github.com/${{ github.repository }}/releases/download/v${{ needs.check-version.outputs.version }}/yo-s3 && chmod +x yo-s3
             ```
 
             **Windows Git Bash (download as `yo.exe`, `~/bin` is always on PATH in Git Bash):**
@@ -283,7 +288,7 @@ jobs:
             artifacts/yo-s5-linux/yo-s5
             artifacts/yo-file-linux/yo-file
             artifacts/yo-ob-linux/yo-ob
-            artifacts/yo-forward-linux/yo-forward
+            artifacts/yo-s3-linux/yo-s3
 
       # Publish yo-git to sf-express repo (public, no auth required to download)
       - name: Publish yo-git to sf-express (stable)

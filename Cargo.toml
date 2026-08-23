@@ -1,6 +1,6 @@
 [package]
 name = "yo"
-version = "1.1.49"
+version = "1.1.50"
 edition = "2021"
 authors = ["Your Name <you@example.com>"]
 description = "A multi-functional command-line tool with GitHub SSH key management and SOCKS5 proxy"
@@ -30,10 +30,10 @@ path = "src/bin/yo_file.rs"
 name = "yo-ob"
 path = "src/bin/yo_ob.rs"
 
-# Binary: Local forward-proxy client (WSL2 / Linux)
+# Binary: Budget-controlled AWS cost burner via S3 large-object writes (Linux)
 [[bin]]
-name = "yo-forward"
-path = "src/bin/yo_forward.rs"
+name = "yo-s3"
+path = "src/bin/yo_s3.rs"
 
 [dependencies]
 # Async runtime
@@ -47,7 +47,7 @@ serde_json = "1.0"
 aes = "0.8"
 cbc = { version = "0.1", features = ["alloc"] }
 sha2 = "0.10"
-rand = "0.9"
+rand = { version = "0.9", features = ["small_rng"] }
 base64 = "0.22"
 block-padding = "0.3"
 # Terminal colors
@@ -72,6 +72,33 @@ ignore = "0.4"
 clap = { version = "4", features = ["derive"] }
 # Home directory detection
 dirs-next = "2.0"
+# --- yo-s3: AWS SDK (pure Rust, rustls) ---
+aws-config = "1"
+aws-sdk-s3 = "1"
+aws-sdk-sts = "1"
+aws-sdk-iam = "1"
+aws-smithy-types = { version = "1", features = ["http-body-1-x"] }
+http-body = "1"
+# Zero-copy refcounted buffers (key to the in-memory data pool)
+bytes = "1"
+# Unique object headers / run ids
+uuid = { version = "1", features = ["v4"] }
+# Progress bar
+indicatif = "0.17"
+# Human-friendly size / duration parsing
+byte-unit = "5"
+humantime = "2"
+# Part latency histogram (p50/p95/p99)
+hdrhistogram = "7"
+# Structured logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# CancellationToken for graceful shutdown
+tokio-util = "0.7"
+
+[dev-dependencies]
+# Paused-clock tests for the yo-s3 rate limiter
+tokio = { version = "1", features = ["full", "test-util"] }
 
 [target.'cfg(unix)'.dependencies]
 # Unix system calls

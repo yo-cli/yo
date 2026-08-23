@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **yo-file** — File utilities and template cloning
 - **yo-s5** — SOCKS5 proxy service via Docker (Linux)
 - **yo-ob** — OceanBase environment preparation (Linux)
-- **yo-forward** — Local forward-proxy client: route traffic through an upstream SOCKS5 (WSL2/Linux)
+- **yo-s3** — Budget-controlled AWS cost burner: S3 large-object writes + CRR traffic (Linux/EC2)
 
 Product specs for each tool live in `specs/`.
 
@@ -22,17 +22,20 @@ cargo build --release --bin yo-git
 cargo build --release --bin yo-file
 cargo build --release --bin yo-s5
 cargo build --release --bin yo-ob
-cargo build --release --bin yo-forward
+cargo build --release --bin yo-s3
 
 # Check all code compiles
 cargo check
+
+# Run unit tests
+cargo test --lib
 
 # Run a specific binary during development
 cargo run --bin yo-git
 cargo run --bin yo-file
 ```
 
-There are no tests or linting configured in this project. The release profile uses `opt-level = 3`, `lto = true`, `strip = true`.
+Unit tests live in the library (`src/s3/*`) and run in CI via `cargo test --lib`. No linting is configured. The release profile uses `opt-level = 3`, `lto = true`, `strip = true`.
 
 ## Architecture
 
@@ -44,7 +47,7 @@ src/
 ├── github/             # GitHub API client, SSH key gen, encrypted token storage
 ├── ob/                 # OceanBase commands and config
 ├── s5/                 # SOCKS5 Docker/proxy management
-├── forward/            # Local forward-proxy client (gost + systemd + shell env)
+├── s3/                 # Budget-controlled AWS cost burner (token bucket, multipart, CRR, checkpoint)
 └── common/             # Shared crypto utilities (AES-256-CBC)
 ```
 
