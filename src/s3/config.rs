@@ -237,6 +237,40 @@ impl ConfigSnapshot {
     }
 }
 
+/// Jitter half-width around the paced average. The mean of a uniform draw over
+/// `[0.6R, 1.4R]` is exactly R, so the planned duration still lands on target
+/// while the rate keeps the wobble that is part of how this tool writes.
+const PACE_JITTER: f64 = 0.4;
+
+/// Highest paced rate worth believing on one instance (10 Gbps). Above this the
+/// plan is network-bound rather than budget-bound, so the run just takes longer
+/// than asked — worth saying out loud, not worth refusing.
+pub const IMPLAUSIBLE_RATE: u64 = 1280 * MIB;
+
+/// The rate range that spends `total_bytes` evenly across `duration`.
+///
+/// This is exact, not a feedback loop: the byte count a budget buys is fixed by
+/// the cost model and does not depend on the rate, so the rate is a plain
+/// division. It also makes resumes self-correcting — a constant rate over a
+/// proportionally smaller remainder lands on the same total active time.
+pub fn pace_rate(total_bytes: u64, duration: Duration) -> Result<(u64, u64)> {
+    let secs = duration.as_secs_f64();
+    if secs <= 0.0 {
+        bail!("--duration 必须 > 0");
+    }
+    let avg = total_bytes as f64 / secs;
+    let min = (avg * (1.0 - PACE_JITTER)) as u64;
+    let max = (avg * (1.0 + PACE_JITTER)) as u64;
+    if min == 0 {
+        bail!(
+            "--duration {} 太长:摊下来平均速率不足 1 B/s(总写入量 {})",
+            humantime::format_duration(duration),
+            fmt_bytes(total_bytes)
+        );
+    }
+    Ok((min, max))
+}
+
 /// Where a run keeps its state: checkpoint, summary, single-instance lock.
 ///
 /// The identity is `(endpoint, bucket, key_prefix)` — the thing one budget
@@ -435,6 +469,49 @@ mod tests {
         let d = a.diff(&c.snapshot());
         assert_eq!(d.len(), 1);
         assert!(d[0].contains("transfer_acceleration"), "{:?}", d);
+    }
+
+    /// The whole point of `--duration`: the estimate derives wall time from
+    /// `(rate_min + rate_max) / 2`, so the paced range must feed that formula
+    /// back the number the user asked for.
+    #[test]
+    fn duration_plan_reproduces_the_requested_wall_time() {
+        let total_bytes = 5 * TIB;
+        for hours in [1u64, 4, 24, 168] {
+            let target = Duration::from_secs(hours * 3600);
+            let (min, max) = pace_rate(total_bytes, target).unwrap();
+            let avg = (min + max) / 2;
+            let secs = total_bytes as f64 / avg as f64;
+            let want = target.as_secs_f64();
+            assert!(
+                (secs - want).abs() / want < 0.001,
+                "{}h 规划反推出 {}s(应为 {}s)",
+                hours,
+                secs,
+                want
+            );
+            assert!(min < max);
+        }
+    }
+
+    /// Pacing must not flatten the rate — the random wobble is part of how this
+    /// tool writes, `--duration` only moves its centre.
+    #[test]
+    fn paced_range_stays_jittery_and_centred() {
+        let (min, max) = pace_rate(100 * GIB, Duration::from_secs(3600)).unwrap();
+        let avg = (min + max) / 2;
+        assert!(avg.abs_diff(100 * GIB / 3600) <= 1);
+        assert!(max > min * 2, "抖动被压平了: {} – {}", min, max);
+    }
+
+    #[test]
+    fn impossible_durations_are_refused_with_a_reason() {
+        assert!(pace_rate(TIB, Duration::ZERO).is_err());
+        // Spread a kilobyte over a year and the floor of the range rounds to 0.
+        let err = pace_rate(1024, Duration::from_secs(86_400 * 365))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--duration"), "{}", err);
     }
 
     /// One budget ledger per (endpoint, bucket, prefix) — and the same inputs

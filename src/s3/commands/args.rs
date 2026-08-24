@@ -63,6 +63,12 @@ pub struct RunArgs {
     #[arg(long, default_value_t = 4)]
     pub concurrent_parts: usize,
 
+    /// 把预算摊到这段时长里烧完(如 24h),速率由此反推。不是上限——
+    /// 到点前烧完预算照样停。想要「最长跑多久」的兜底请用 --max-duration。
+    /// 与 --rate-min / --rate-max 互斥
+    #[arg(long, value_parser = parse_duration, conflicts_with_all = ["rate_min", "rate_max"])]
+    pub duration: Option<Duration>,
+
     /// 速率下限(如 200MiB 或 200MiB/s)
     #[arg(long, value_parser = parse_rate, default_value = "200MiB")]
     pub rate_min: u64,
@@ -95,7 +101,8 @@ pub struct RunArgs {
     #[arg(long, value_enum, default_value = "all")]
     pub stop_when: StopWhen,
 
-    /// 兜底最长运行时长(跨 resume 累计),到点强制优雅退出
+    /// 兜底上限:跨 resume 累计运行到点就强制优雅退出,**预算可能没烧完**。
+    /// 想规划「用多久烧完」是 --duration,不是这个
     #[arg(long, value_parser = parse_duration)]
     pub max_duration: Option<Duration>,
 

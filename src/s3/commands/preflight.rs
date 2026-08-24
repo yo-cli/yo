@@ -17,7 +17,7 @@ use crate::s3::client::{
 };
 use crate::s3::config::{self, AccelMode, BenchConfig};
 use crate::s3::cost::{
-    path_surcharges, pricing_for, print_estimate, write_lifecycle_files, CostModel, Pricing,
+    self, path_surcharges, pricing_for, print_estimate, write_lifecycle_files, CostModel, Pricing,
 };
 use crate::s3::lock::{self, Acquired, RunLock};
 use crate::s3::modes::{BurnMode, ModeCtx};
@@ -290,6 +290,42 @@ pub async fn prepare(args: RunArgs) -> Result<RunContext> {
              或提供 --total-size / --iterations / --max-duration 之一作为边界",
             cfg.mode
         );
+    }
+
+    // --- 6.5 --duration: turn a target wall time into a rate ---
+    // Done here and not at config time because the byte count depends on the
+    // composed cost model, which only exists once the mode is armed.
+    if let Some(target) = args.duration {
+        let total_bytes = if cost.budget_drives_stop() {
+            cost::budget_bytes(cfg.budget_micro, &cost, &pricing, cfg.part_size)
+        } else {
+            // No per-byte cost means the budget cannot say how many bytes to
+            // write, so there is nothing to spread — the user has to bound it.
+            cfg.total_size.context(
+                "模式 {} 没有按字节计费的即时成本,--duration 无从推导写入量;\
+                 请补 --total-size,或换用 crr 模式",
+            )?
+        };
+        let (min, max) = config::pace_rate(total_bytes, target)?;
+        cfg.rate_min = min;
+        cfg.rate_max = max;
+        let avg = (min + max) / 2;
+        println!(
+            "{} 按 --duration {} 规划:平均 {}(区间 {} – {})",
+            "ℹ".blue(),
+            humantime::format_duration(target),
+            crate::s3::fmt_rate(avg).bold(),
+            crate::s3::fmt_rate(min),
+            crate::s3::fmt_rate(max)
+        );
+        if avg > config::IMPLAUSIBLE_RATE {
+            println!(
+                "{} 这个速率超过单机常见网络上限(10 Gbps),实际多半达不到 —— \
+                 届时预算照样烧完,只是比 {} 更久",
+                "⚠".yellow(),
+                humantime::format_duration(target)
+            );
+        }
     }
 
     // --- 7. estimate + lifecycle files + the confirmation gate ---

@@ -56,6 +56,28 @@ yo-s3 --budget 500 --bucket my-burn-bucket --dest-region us-west-2,eu-west-1 --y
 
 中断后续跑:直接重跑同一条命令,发现 checkpoint 会询问(或 `--yes` 自动)继续。
 
+### 想让它跑满 N 小时:`--duration`
+
+默认是**能多快烧多快**,$500 大约 4 小时就烧光了。想摊到一整天:
+
+```bash
+yo-s3 --budget 500 --bucket my-burn-bucket --duration 24h
+```
+
+```
+ℹ 按 --duration 1day 规划:平均 65.83 MiB/s(区间 39.50 MiB/s – 92.16 MiB/s)
+  预计写入总量:         5.42 TiB
+  预计耗时:             1day
+```
+
+原理是一个除法:预算能买多少字节由单价决定、与速率无关,所以「要写的量 ÷ 目标时长 = 需要的速率」。不是边跑边调,开跑前就定死了。
+
+- **它不是上限**。到点前预算烧完照样停 —— 想要「最长跑多久」的兜底是 `--max-duration`,那个到点会强制停、预算可能没烧完
+- 速率仍然随机抖动(区间是 ±40%,均值正好落在目标上),只是抖动中心被挪到了推导出来的速率
+- **续跑自动对齐**:速率恒定、剩余字节按比例减少,烧掉一半后重启,累计有效时长仍是你要的那个数
+- 时长排得太短(推导速率超过 10 Gbps)会警告但不拦你 —— 达不到只是跑得比计划久,预算照样烧完
+- `--mode write-only` 没有按字节计费,推不出写入量,需要配 `--total-size` 一起用
+
 ## 烧钱模式(`--mode`)
 
 模式决定**用哪个 AWS 计费项当引擎**;预算记账、限速、断点续跑、清扫等其余机制所有模式共用。
@@ -214,7 +236,8 @@ yo-s3 --transfer-acceleration off   # 完全不用
 | `--rate-mode` | `continuous` | `continuous` 每 30s 换速 / `per-object` 每对象定一次 |
 | `--rate-resample-interval` | `30s` | continuous 模式换速间隔 |
 | `--retain` | `24h` | 对象保留时长,后台每 10 分钟物理删除超期版本(源桶+目标桶);`0s` = 永不删 |
-| `--total-size` / `--iterations` / `--max-duration` | 无 | 可选边界;`--stop-when any` 时任一先到即停 |
+| `--duration` | 无 | **规划**用多久烧完(如 `24h`),速率由此反推。与 `--rate-min`/`--rate-max` 互斥 |
+| `--total-size` / `--iterations` / `--max-duration` | 无 | 可选**边界**(到点/到量强制停,预算可能没烧完);`--stop-when any` 时任一先到即停 |
 | `--checkpoint` | 状态目录下 `ckpt.json` | 每完成一个对象原子写一次;存在即可续跑 |
 | `--summary-out` | 状态目录下 `summary.json` | 结束时的机器可读摘要 |
 | `--report-interval` | `10s` | 运行报告间隔 |

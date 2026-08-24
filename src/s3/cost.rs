@@ -203,6 +203,17 @@ fn pad_label(label: &str) -> String {
 }
 
 /// Print the pre-run estimate page: how many bytes the budget buys, the fee
+/// How many bytes the budget buys: budget ÷ (per-byte transfer + amortized
+/// per-part request fee). Shared by the estimate and by `--duration` pacing so
+/// the number shown and the number planned against can never drift apart.
+pub fn budget_bytes(budget_micro: u64, cost: &CostModel, pricing: &Pricing, part_size: u64) -> u64 {
+    let per_byte = cost.micro_per_byte() + pricing.request_micro(1) as f64 / part_size as f64;
+    if per_byte <= 0.0 {
+        return 0;
+    }
+    (budget_micro as f64 / per_byte) as u64
+}
+
 /// breakdown, expected duration, and the traps worth knowing before burning.
 /// `cost` is the composed model (mode engine + upload-path surcharges), not
 /// `mode.cost_model()` — the mode does not know what the path adds.
@@ -219,10 +230,7 @@ pub fn print_estimate(cfg: &BenchConfig, pricing: &Pricing, mode: &dyn BurnMode,
     let budget = cfg.budget_micro;
     let dests = mode.destinations();
     if cost.budget_drives_stop() {
-        // bytes the budget buys ≈ budget / (transfer + request fees per byte)
-        let per_byte =
-            cost.micro_per_byte() + pricing.request_micro(1) as f64 / cfg.part_size as f64;
-        let total_bytes = (budget as f64 / per_byte) as u64;
+        let total_bytes = budget_bytes(budget, cost, pricing, cfg.part_size);
         let n_objects = total_bytes.div_ceil(cfg.object_size);
         let n_requests = total_bytes.div_ceil(cfg.part_size) + n_objects * cost.requests_per_object;
         let requests = pricing.request_micro(n_requests);
