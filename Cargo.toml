@@ -1,6 +1,6 @@
 [package]
 name = "yo"
-version = "1.1.50"
+version = "1.1.51"
 edition = "2021"
 authors = ["Your Name <you@example.com>"]
 description = "A multi-functional command-line tool with GitHub SSH key management and SOCKS5 proxy"
@@ -77,6 +77,13 @@ aws-config = "1"
 aws-sdk-s3 = "1"
 aws-sdk-sts = "1"
 aws-sdk-iam = "1"
+# Route table / VPC endpoint lookup: detects whether S3 traffic pays the NAT
+# gateway data-processing fee ($0.045/GB), which the budget must account for.
+# Costs ~155s of build time (all 1512 EC2 operations are generated and AWS does
+# not gate them per operation — awslabs/aws-sdk-rust#113), but LTO strips the
+# unused ones, so the shipped binary is SMALLER than hand-rolling the two calls
+# over reqwest, which would link a second HTTP stack next to the SDK's.
+aws-sdk-ec2 = "1"
 aws-smithy-types = { version = "1", features = ["http-body-1-x"] }
 http-body = "1"
 # Zero-copy refcounted buffers (key to the in-memory data pool)
@@ -95,6 +102,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # CancellationToken for graceful shutdown
 tokio-util = "0.7"
+# Object-safe async trait methods (yo-s3 burn modes are dyn-dispatched)
+async-trait = "0.1"
 
 [dev-dependencies]
 # Paused-clock tests for the yo-s3 rate limiter

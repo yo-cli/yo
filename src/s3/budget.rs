@@ -2,13 +2,16 @@
 // micro-dollars in atomics (no float atomics, no drift from repeated adds).
 //
 // Budget scope (confirmed with the user): only IMMEDIATE costs count toward
-// the stop condition — request fees + CRR inter-region transfer. Storage cost
-// accrues with time after the tool exits and cannot be stopped precisely, so
-// it is estimated and displayed but never part of the stop decision.
+// the stop condition — request fees + the active mode's per-byte transfer fee.
+// Storage cost accrues with time after the tool exits and cannot be stopped
+// precisely, so it is estimated and displayed but never part of the decision.
+//
+// The ledger knows nothing about which mode is running: the mode's `CostModel`
+// is the only thing that turns bytes into money here.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::cost::Pricing;
+use super::cost::{CostModel, Pricing};
 use super::MIB;
 
 /// Smallest object worth scheduling when shrinking the tail to fit the budget.
@@ -17,7 +20,7 @@ const MIN_TAIL_OBJECT: u64 = 8 * MIB;
 pub struct BudgetMeter {
     budget_micro: u64,
     pricing: Pricing,
-    crr_enabled: bool,
+    cost: CostModel,
     part_size: u64,
     /// Burned so far: request fees (on success) + committed transfer fees.
     burned_micro: AtomicU64,
@@ -33,13 +36,13 @@ impl BudgetMeter {
         budget_micro: u64,
         already_burned_micro: u64,
         pricing: Pricing,
-        crr_enabled: bool,
+        cost: CostModel,
         part_size: u64,
     ) -> Self {
         Self {
             budget_micro,
             pricing,
-            crr_enabled,
+            cost,
             part_size,
             burned_micro: AtomicU64::new(already_burned_micro),
             reserved_micro: AtomicU64::new(0),
@@ -52,8 +55,8 @@ impl BudgetMeter {
         &self.pricing
     }
 
-    pub fn crr_enabled(&self) -> bool {
-        self.crr_enabled
+    pub fn cost(&self) -> &CostModel {
+        &self.cost
     }
 
     pub fn budget_micro(&self) -> u64 {
@@ -92,15 +95,8 @@ impl BudgetMeter {
     /// Immediate cost of one whole object of `bytes` (transfer + its requests).
     fn object_cost_micro(&self, bytes: u64) -> u64 {
         let parts = bytes.div_ceil(self.part_size);
-        // +2: CreateMultipartUpload + CompleteMultipartUpload; +1 replication
-        // PUT on the destination side when CRR is on.
-        let reqs = parts + 2 + if self.crr_enabled { 1 } else { 0 };
-        let transfer = if self.crr_enabled {
-            self.pricing.transfer_micro(bytes)
-        } else {
-            0
-        };
-        transfer + self.pricing.request_micro(reqs)
+        let reqs = parts + self.cost.requests_per_object;
+        self.cost.transfer_micro(bytes) + self.pricing.request_micro(reqs)
     }
 
     /// Decide the size of the next object so the run lands exactly on budget:
@@ -110,7 +106,7 @@ impl BudgetMeter {
         if self.exhausted() {
             return None;
         }
-        if !self.crr_enabled {
+        if !self.cost.budget_drives_stop() {
             // Request fees alone burn ~$0.02/TiB — budget can't drive sizing.
             // Scheduling continues; secondary bounds / budget exhaustion stop it.
             self.reserve(self.object_cost_micro(default_size));
@@ -125,9 +121,9 @@ impl BudgetMeter {
         // Shrink the tail: bytes affordable with the remaining budget.
         // Per-byte cost includes per-part request fees amortized over the part
         // size, so the hard budget ceiling holds to the micro-dollar.
-        let per_byte = self.pricing.transfer_micro_per_byte()
+        let per_byte = self.cost.micro_per_byte()
             + self.pricing.request_micro(1) as f64 / self.part_size as f64;
-        let overhead = self.pricing.request_micro(3); // create+complete+replication PUT
+        let overhead = self.pricing.request_micro(self.cost.requests_per_object);
         let avail = remaining.saturating_sub(overhead) as f64;
         let bytes = (avail / per_byte) as u64;
         let bytes = (bytes / MIB) * MIB; // tidy MiB alignment
@@ -164,8 +160,8 @@ impl BudgetMeter {
     /// (Its request fees were already burned per successful request.)
     pub fn commit_object(&self, bytes: u64) {
         self.release(bytes);
-        if self.crr_enabled {
-            let micro = self.pricing.transfer_micro(bytes);
+        let micro = self.cost.transfer_micro(bytes);
+        if micro > 0 {
             self.burned_micro.fetch_add(micro, Ordering::Relaxed);
             self.transfer_micro.fetch_add(micro, Ordering::Relaxed);
         }
@@ -180,7 +176,7 @@ impl BudgetMeter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::s3::cost::Pricing;
+    use crate::s3::cost::{Pricing, TransferFee};
     use crate::s3::{GIB, MIB};
 
     fn pricing() -> Pricing {
@@ -193,10 +189,18 @@ mod tests {
         }
     }
 
+    /// The `crr` mode's cost shape: $0.02/GB transfer + 3 requests per object.
+    fn crr_cost() -> CostModel {
+        CostModel {
+            transfer: vec![TransferFee::per_gb("跨区复制流量费", 0.02)],
+            requests_per_object: 3,
+        }
+    }
+
     #[test]
     fn full_objects_then_shrunken_tail_then_stop() {
         // $1 budget, 10 GiB objects at $0.02/GiB-ish → ~5 full objects
-        let meter = BudgetMeter::new(1_000_000, 0, pricing(), true, GIB);
+        let meter = BudgetMeter::new(1_000_000, 0, pricing(), crr_cost(), GIB);
         let mut planned: Vec<u64> = Vec::new();
         while let Some(size) = meter.plan_next_object(10 * GIB) {
             planned.push(size);
@@ -221,9 +225,36 @@ mod tests {
         assert!(burned >= 950_000, "burned {}", burned);
     }
 
+    /// The budget is a hard ceiling at every fan-out width. K changes both the
+    /// per-byte rate and the per-object request count, which the tail-shrink
+    /// math depends on — an off-by-one there overshoots real money.
+    #[test]
+    fn hard_ceiling_holds_at_every_fanout() {
+        for k in 1..=4u64 {
+            let cost = CostModel {
+                transfer: vec![TransferFee::per_gb("crr", 0.02 * k as f64)],
+                requests_per_object: 2 + k,
+            };
+            let meter = BudgetMeter::new(1_000_000, 0, pricing(), cost, GIB);
+            let mut total_bytes = 0u64;
+            while let Some(size) = meter.plan_next_object(10 * GIB) {
+                total_bytes += size;
+                meter.record_requests(size.div_ceil(GIB) + 2 + k);
+                meter.commit_object(size);
+            }
+            let burned = meter.burned_micro();
+            assert!(burned <= 1_000_000, "k={} 超出预算硬上限: {}", k, burned);
+            assert!(burned >= 940_000, "k={} 远未烧满: {}", k, burned);
+            // K× the rate must buy ~1/K the bytes for the same dollar.
+            let expected = 50 * GIB / k;
+            let ratio = total_bytes as f64 / expected as f64;
+            assert!((0.85..=1.15).contains(&ratio), "k={} 写入量偏离: {}", k, ratio);
+        }
+    }
+
     #[test]
     fn abort_releases_reservation() {
-        let meter = BudgetMeter::new(1_000_000, 0, pricing(), true, GIB);
+        let meter = BudgetMeter::new(1_000_000, 0, pricing(), crr_cost(), GIB);
         let size = meter.plan_next_object(10 * GIB).unwrap();
         let before = meter.remaining_micro();
         meter.abort_object(size);
@@ -233,15 +264,18 @@ mod tests {
 
     #[test]
     fn resume_restores_burned_amount() {
-        let meter = BudgetMeter::new(1_000_000, 999_999, pricing(), true, GIB);
+        let meter = BudgetMeter::new(1_000_000, 999_999, pricing(), crr_cost(), GIB);
         assert!(!meter.exhausted());
         meter.record_requests(1000); // $0.005 → crosses the line
         assert!(meter.exhausted());
     }
 
     #[test]
-    fn no_crr_mode_never_shrinks() {
-        let meter = BudgetMeter::new(1_000_000, 0, pricing(), false, GIB);
+    fn request_only_mode_never_shrinks() {
+        let meter = BudgetMeter::new(1_000_000, 0, pricing(), CostModel::request_only(), GIB);
         assert_eq!(meter.plan_next_object(10 * GIB), Some(10 * GIB));
+        // No per-byte fee: completing an object burns nothing beyond requests.
+        meter.commit_object(10 * GIB);
+        assert_eq!(meter.transfer_micro(), 0);
     }
 }

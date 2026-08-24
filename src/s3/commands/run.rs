@@ -22,7 +22,7 @@ use crate::s3::limiter::RateLimiter;
 use crate::s3::metrics::{Metrics, RunSummary};
 use crate::s3::pool::BufferPool;
 use crate::s3::registry::{abort_orphans, UploadRegistry};
-use crate::s3::uploader::{upload_object, ObjectOutcome, UploadCtx};
+use crate::s3::uploader::{ObjectOutcome, UploadCtx};
 use crate::s3::{fmt_bytes, fmt_rate, fmt_usd, sweep};
 
 const MAX_CONSECUTIVE_FAILURES: u32 = 3;
@@ -31,8 +31,9 @@ pub async fn run(args: RunArgs) -> Result<()> {
     let RunContext {
         cfg,
         s3,
-        dest,
-        crr_active,
+        upload_s3,
+        mode,
+        cost,
         pricing,
         mut ckpt,
         resumed,
@@ -58,13 +59,13 @@ pub async fn run(args: RunArgs) -> Result<()> {
         cfg.budget_micro,
         ckpt.burned_micro,
         pricing.clone(),
-        crr_active,
+        cost,
         cfg.part_size,
     ));
     let registry = Arc::new(UploadRegistry::new());
     let cancel = CancellationToken::new();
     let uctx = Arc::new(UploadCtx {
-        client: s3.clone(),
+        client: upload_s3,
         bucket: cfg.bucket.clone(),
         key_prefix: cfg.key_prefix.clone(),
         run_id,
@@ -142,11 +143,11 @@ pub async fn run(args: RunArgs) -> Result<()> {
         s3.clone(),
         pb.clone(),
         cancel.clone(),
-        crr_active,
+        mode.clone(),
         backlog_pending.clone(),
     );
     if !cfg.dry_run && cfg.retain > Duration::ZERO {
-        spawn_sweeper(&cfg, s3.clone(), dest.as_ref(), pb.clone(), cancel.clone());
+        spawn_sweeper(&cfg, s3.clone(), mode.destinations(), pb.clone(), cancel.clone());
     }
 
     // --- scheduler loop ---
@@ -186,7 +187,10 @@ pub async fn run(args: RunArgs) -> Result<()> {
                 &pb,
                 format!("⬆ 开始上传 obj-{:06}({})", next_iteration, fmt_bytes(size)),
             );
-            inflight.spawn(upload_object(uctx.clone(), next_iteration, size));
+            let mode = mode.clone();
+            let uctx = uctx.clone();
+            let iteration = next_iteration;
+            inflight.spawn(async move { mode.run_unit(uctx, iteration, size).await });
             next_iteration += 1;
             scheduled_bytes += size;
         }
@@ -266,7 +270,8 @@ pub async fn run(args: RunArgs) -> Result<()> {
         .or(local_stop)
         .unwrap_or_else(|| "完成".to_string());
 
-    finish(&cfg, &ckpt, &budget, &metrics, &pricing, dest.as_ref().map(|d| d.bucket.clone()), &reason, session_start, base_active, backlog_pending.load(Ordering::Relaxed), &s3).await
+    let dest_buckets: Vec<String> = mode.destinations().iter().map(|d| d.bucket.clone()).collect();
+    finish(&cfg, &ckpt, &budget, &metrics, &pricing, dest_buckets, &reason, session_start, base_active, backlog_pending.load(Ordering::Relaxed), &s3).await
 }
 
 enum Outcome {
@@ -326,7 +331,7 @@ async fn finish(
     budget: &BudgetMeter,
     metrics: &Metrics,
     pricing: &crate::s3::cost::Pricing,
-    dest_bucket: Option<String>,
+    dest_buckets: Vec<String>,
     reason: &str,
     session_start: Instant,
     base_active: u64,
@@ -343,16 +348,16 @@ async fn finish(
         0
     };
     let retain_hours = cfg.retain.as_secs_f64() / 3600.0;
-    let storage_est = pricing.storage_micro_for(
-        ckpt.completed_bytes * if dest_bucket.is_some() { 2 } else { 1 },
-        retain_hours,
-    );
+    // Source plus one stored copy per replication destination.
+    let copies = 1 + dest_buckets.len() as u64;
+    let storage_est = pricing.storage_micro_for(ckpt.completed_bytes * copies, retain_hours);
 
     let summary = RunSummary {
         run_id: ckpt.run_id.clone(),
+        mode: cfg.mode.to_string(),
         dry_run: cfg.dry_run,
         bucket: cfg.bucket.clone(),
-        dest_bucket: dest_bucket.clone(),
+        dest_buckets: dest_buckets.clone(),
         region: pricing.region.clone(),
         started_at: ckpt.started_at.to_rfc3339(),
         finished_at: chrono::Utc::now().to_rfc3339(),
@@ -375,7 +380,7 @@ async fn finish(
         slowdown_count: ckpt.slowdown_total,
         error_count: ckpt.error_total,
         part_latency: latency,
-        replication_pending_sampled: if dest_bucket.is_some() { Some(backlog_pending) } else { None },
+        replication_pending_sampled: (!dest_buckets.is_empty()).then_some(backlog_pending),
     };
 
     println!("\n{}", "🏁 运行结束".cyan().bold());
@@ -406,9 +411,10 @@ async fn finish(
         summary.slowdown_count, summary.parts_retried, summary.error_count
     );
     println!(
-        "  {} 存储费(不计入预算):约 {}(两侧保留 {:.0}h 口径,以账单为准)",
+        "  {} 存储费(不计入预算):约 {}({} 份保留 {:.0}h 口径,以账单为准)",
         "ℹ".blue(),
         fmt_usd(storage_est),
+        copies,
         retain_hours
     );
 

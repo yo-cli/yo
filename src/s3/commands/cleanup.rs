@@ -25,17 +25,23 @@ pub async fn run(args: CleanupArgs) -> Result<()> {
         endpoint_url: args.endpoint_url.clone(),
         path_style: args.path_style,
         insecure_skip_tls_verify: args.insecure_skip_tls_verify,
+        // Cleanup is list/delete only — the accelerate endpoint serves neither.
+        accelerate: false,
     };
     let s3 = build_s3_client(&shared, &opts, None)?;
 
-    // Source + (when replication is configured) destination
+    // Source + every replication destination. Missing one leaves a full copy
+    // of the data billing storage in that region forever.
     let mut targets: Vec<(aws_sdk_s3::Client, String)> = vec![(s3.clone(), bucket.clone())];
     if args.endpoint_url.is_none() {
-        if let Ok(Some(info)) = crr::detect(&s3, &bucket).await {
-            let dest_region = discover_bucket_region(&s3, &info.dest_bucket).await.unwrap_or(None);
-            let dest_client = build_s3_client(&shared, &ClientOpts::default(), dest_region.as_deref())?;
-            println!("{} 检测到复制目标桶 {},一并清理", "ℹ".blue(), info.dest_bucket);
-            targets.push((dest_client, info.dest_bucket));
+        if let Ok(dest_buckets) = crr::detect(&s3, &bucket).await {
+            for dest_bucket in dest_buckets {
+                let dest_region = discover_bucket_region(&s3, &dest_bucket).await.unwrap_or(None);
+                let dest_client =
+                    build_s3_client(&shared, &ClientOpts::default(), dest_region.as_deref())?;
+                println!("{} 检测到复制目标桶 {},一并清理", "ℹ".blue(), dest_bucket);
+                targets.push((dest_client, dest_bucket));
+            }
         }
     }
 

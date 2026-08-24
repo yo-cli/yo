@@ -4,6 +4,7 @@ use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+use super::modes::ModeId;
 use super::{fmt_bytes, GIB, MAX_OBJECT_SIZE, MAX_PARTS_PER_OBJECT, MAX_PART_SIZE, MIB, MIN_PART_SIZE};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
@@ -13,6 +14,22 @@ pub enum RateMode {
     Continuous,
     /// Sample the target rate once at the start of each object
     PerObject,
+}
+
+/// How to decide whether uploads take the Transfer Acceleration edge endpoint.
+///
+/// `Auto` exists because AWS does not bill acceleration it does not deliver:
+/// a client in the same region as the bucket is not charged, so forcing it on
+/// there would put $0.04/GB into the estimate that never lands on the bill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum AccelMode {
+    /// 自动:能生效且会真正计费时启用(默认)
+    #[default]
+    Auto,
+    /// 强制启用;桶或参数不支持时直接报错
+    On,
+    /// 始终不用
+    Off,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
@@ -27,6 +44,8 @@ pub enum StopWhen {
 /// Fully resolved run configuration (CLI + interactive fill-in).
 #[derive(Debug, Clone)]
 pub struct BenchConfig {
+    /// Which cost engine burns the budget (see s3::modes).
+    pub mode: ModeId,
     pub bucket: String,
     pub key_prefix: String,
     pub budget_micro: u64,
@@ -34,6 +53,9 @@ pub struct BenchConfig {
     pub endpoint_url: Option<String>,
     pub path_style: bool,
     pub insecure_skip_tls_verify: bool,
+    /// Whether acceleration is actually ARMED for this run (+$0.04/GB), after
+    /// resolving `--transfer-acceleration`. Set by preflight, not by the CLI.
+    pub transfer_acceleration: bool,
 
     pub object_size: u64,
     pub part_size: u64,
@@ -127,6 +149,8 @@ impl BenchConfig {
 
     pub fn snapshot(&self) -> ConfigSnapshot {
         ConfigSnapshot {
+            mode: self.mode,
+            transfer_acceleration: self.transfer_acceleration,
             bucket: self.bucket.clone(),
             key_prefix: self.key_prefix.clone(),
             budget_micro: self.budget_micro,
@@ -145,6 +169,13 @@ impl BenchConfig {
 /// affect where data goes, how it is laid out, or what "done" means.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConfigSnapshot {
+    /// Absent in checkpoints written before modes existed — those runs were
+    /// always the CRR engine, which is what `ModeId::default()` is.
+    #[serde(default)]
+    pub mode: ModeId,
+    /// Changes the per-byte rate, so it must not flip across a resume.
+    #[serde(default)]
+    pub transfer_acceleration: bool,
     pub bucket: String,
     pub key_prefix: String,
     pub budget_micro: u64,
@@ -166,6 +197,12 @@ impl ConfigSnapshot {
                 d.push(format!("{}: checkpoint={} 当前={}", name, a, b));
             }
         };
+        cmp("mode", self.mode.to_string(), other.mode.to_string());
+        cmp(
+            "transfer_acceleration",
+            self.transfer_acceleration.to_string(),
+            other.transfer_acceleration.to_string(),
+        );
         cmp("bucket", self.bucket.clone(), other.bucket.clone());
         cmp("key_prefix", self.key_prefix.clone(), other.key_prefix.clone());
         cmp(
@@ -230,6 +267,7 @@ mod tests {
 
     fn base() -> BenchConfig {
         BenchConfig {
+            mode: ModeId::Crr,
             bucket: "b".into(),
             key_prefix: "yo-s3-bench/".into(),
             budget_micro: 500_000_000,
@@ -237,6 +275,7 @@ mod tests {
             endpoint_url: None,
             path_style: false,
             insecure_skip_tls_verify: false,
+            transfer_acceleration: false,
             object_size: TIB,
             part_size: 256 * MIB,
             pool_size: 2 * GIB,
@@ -295,5 +334,37 @@ mod tests {
         c.budget_micro = 100_000_000;
         let d = a.diff(&c.snapshot());
         assert_eq!(d.len(), 2);
+    }
+
+    /// Acceleration defaults to auto, never to a forced on/off — forcing it on
+    /// would add a fee AWS does not charge when client and bucket share a
+    /// region, which is this tool's most common deployment.
+    #[test]
+    fn acceleration_defaults_to_auto() {
+        assert_eq!(AccelMode::default(), AccelMode::Auto);
+    }
+
+    #[test]
+    fn toggling_acceleration_blocks_resume() {
+        // TA changes the per-byte rate; burned_micro from the other setting
+        // would be accounted at the wrong price.
+        let a = base().snapshot();
+        let mut c = base();
+        c.transfer_acceleration = true;
+        let d = a.diff(&c.snapshot());
+        assert_eq!(d.len(), 1);
+        assert!(d[0].contains("transfer_acceleration"), "{:?}", d);
+    }
+
+    #[test]
+    fn switching_mode_blocks_resume() {
+        // Different engine = different cost accounting; burned_micro from the
+        // old mode would be meaningless. Must surface as a diff, not silence.
+        let a = base().snapshot();
+        let mut c = base();
+        c.mode = ModeId::WriteOnly;
+        let d = a.diff(&c.snapshot());
+        assert_eq!(d.len(), 1);
+        assert!(d[0].contains("mode"), "{:?}", d);
     }
 }

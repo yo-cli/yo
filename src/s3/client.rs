@@ -15,6 +15,8 @@ pub struct ClientOpts {
     pub endpoint_url: Option<String>,
     pub path_style: bool,
     pub insecure_skip_tls_verify: bool,
+    /// Route uploads through the S3 Transfer Acceleration edge endpoint.
+    pub accelerate: bool,
 }
 
 /// Load the shared AWS config (region from --region / env / profile / IMDS).
@@ -78,6 +80,11 @@ pub fn build_s3_client(
     }
     if opts.path_style {
         builder = builder.force_path_style(true);
+    }
+    if opts.accelerate {
+        // Sends to <bucket>.s3-accelerate.amazonaws.com. Virtual-hosted only,
+        // so it is incompatible with path-style (rejected in validate()).
+        builder = builder.accelerate(true);
     }
     Ok(aws_sdk_s3::Client::from_conf(builder.build()))
 }

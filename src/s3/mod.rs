@@ -4,6 +4,7 @@
 // immediately and linearly with bytes written, so the tool can stop precisely
 // when the budget is reached. See specs/yo_s3.md.
 
+pub mod accel;
 pub mod body;
 pub mod budget;
 pub mod checkpoint;
@@ -14,6 +15,8 @@ pub mod cost;
 pub mod crr;
 pub mod limiter;
 pub mod metrics;
+pub mod modes;
+pub mod netpath;
 pub mod pool;
 pub mod registry;
 pub mod sweep;

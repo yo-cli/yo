@@ -89,9 +89,12 @@ pub struct LatencySummary {
 #[derive(Serialize)]
 pub struct RunSummary {
     pub run_id: String,
+    /// Burn mode that produced this run (see s3::modes).
+    pub mode: String,
     pub dry_run: bool,
     pub bucket: String,
-    pub dest_bucket: Option<String>,
+    /// Every replication destination; its length is the transfer fee's ×K.
+    pub dest_buckets: Vec<String>,
     pub region: String,
     pub started_at: String,
     pub finished_at: String,

@@ -8,12 +8,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
-use super::preflight::DestTarget;
 use crate::s3::budget::BudgetMeter;
 use crate::s3::config::BenchConfig;
 use crate::s3::limiter::RateLimiter;
 use crate::s3::metrics::Metrics;
-use crate::s3::{crr, fmt_bytes, fmt_rate, fmt_usd, sweep};
+use crate::s3::modes::{BurnMode, DestTarget, ObserveCtx};
+use crate::s3::{fmt_bytes, fmt_rate, fmt_usd, sweep};
 
 const SWEEP_INTERVAL: Duration = Duration::from_secs(600);
 
@@ -74,7 +74,7 @@ pub fn spawn_reporter(
     s3: aws_sdk_s3::Client,
     pb: ProgressBar,
     cancel: CancellationToken,
-    crr_enabled: bool,
+    mode: Arc<dyn BurnMode>,
     backlog_pending: Arc<AtomicU64>,
 ) {
     let interval = cfg.report_interval;
@@ -100,19 +100,25 @@ pub fn spawn_reporter(
             pb.set_message(format!("{} / {}", fmt_usd(burned), fmt_usd(budget_total)));
 
             let mut backlog_txt = String::new();
-            if crr_enabled && !dry_run {
+            if !dry_run {
                 let keys = metrics.recent_keys(5);
                 if !keys.is_empty() {
-                    let (pending, failed) = crr::sample_backlog(&s3, &bucket, &keys).await;
-                    backlog_pending.store(pending, Ordering::Relaxed);
-                    backlog_txt = format!(" | 复制积压 {}/{}", pending, keys.len());
-                    if failed > 0 {
-                        backlog_txt.push_str(&format!("(失败 {}!)", failed));
+                    let observed = mode
+                        .observe(&ObserveCtx {
+                            s3: &s3,
+                            bucket: &bucket,
+                            keys: &keys,
+                        })
+                        .await;
+                    if let Some(obs) = observed {
+                        backlog_pending.store(obs.pending, Ordering::Relaxed);
+                        backlog_txt = obs.text;
                     }
                 }
             }
-            let eta = if crr_enabled && inst > 0 {
-                let per_byte = budget.pricing().transfer_micro_per_byte();
+            // ETA only means something when cost accrues per byte written.
+            let per_byte = budget.cost().micro_per_byte();
+            let eta = if per_byte > 0.0 && inst > 0 {
                 let rem = budget_total.saturating_sub(burned) as f64;
                 let secs = rem / (inst as f64 * per_byte);
                 format!(
@@ -142,18 +148,18 @@ pub fn spawn_reporter(
 }
 
 /// Every 10 minutes, physically delete tool-created versions older than
-/// --retain, on the source and the replication destination.
+/// --retain, on the source and on every replication destination.
 pub fn spawn_sweeper(
     cfg: &BenchConfig,
     s3: aws_sdk_s3::Client,
-    dest: Option<&DestTarget>,
+    dests: &[DestTarget],
     pb: ProgressBar,
     cancel: CancellationToken,
 ) {
     let retain = cfg.retain;
     let prefix = cfg.key_prefix.clone();
     let mut targets = vec![(s3, cfg.bucket.clone())];
-    if let Some(d) = dest {
+    for d in dests {
         targets.push((d.client.clone(), d.bucket.clone()));
     }
     tokio::spawn(async move {

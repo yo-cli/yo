@@ -93,10 +93,13 @@ impl Checkpoint {
 mod tests {
     use super::*;
     use crate::s3::config::RateMode;
+    use crate::s3::modes::ModeId;
     use crate::s3::MIB;
 
     fn snapshot() -> ConfigSnapshot {
         ConfigSnapshot {
+            mode: ModeId::Crr,
+            transfer_acceleration: false,
             bucket: "b".into(),
             key_prefix: "p/".into(),
             budget_micro: 1_000_000,

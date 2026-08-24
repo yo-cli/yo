@@ -5,10 +5,17 @@
 use clap::Args;
 use std::time::Duration;
 
-use crate::s3::config::{parse_duration, parse_rate, parse_size, parse_usd, RateMode, StopWhen};
+use crate::s3::config::{
+    parse_duration, parse_rate, parse_size, parse_usd, AccelMode, RateMode, StopWhen,
+};
+use crate::s3::modes::ModeId;
 
 #[derive(Args, Debug, Clone)]
 pub struct RunArgs {
+    /// 烧钱模式(成本引擎):crr 跨区复制流量 / write-only 纯写入
+    #[arg(long, value_enum, default_value_t = ModeId::Crr)]
+    pub mode: ModeId,
+
     /// 要烧掉的预算金额(美元)。省略时交互询问
     #[arg(long, value_parser = parse_usd)]
     pub budget: Option<u64>,
@@ -109,6 +116,17 @@ pub struct RunArgs {
     #[arg(long)]
     pub insecure_skip_tls_verify: bool,
 
+    /// 传输加速(+$0.04/GB,叠加在所选 mode 之上):auto 能生效且会计费时自动启用 /
+    /// on 强制 / off 关闭。裸写 --transfer-acceleration 等同 on
+    #[arg(
+        long,
+        value_enum,
+        num_args = 0..=1,
+        default_value = "auto",
+        default_missing_value = "on"
+    )]
+    pub transfer_acceleration: AccelMode,
+
     /// 全流程演练:不发任何真实写入请求
     #[arg(long)]
     pub dry_run: bool,
@@ -124,9 +142,9 @@ pub struct SetupCrrArgs {
     #[arg(long)]
     pub bucket: Option<String>,
 
-    /// 复制目标区域(省略时交互询问,如 us-west-2)
-    #[arg(long)]
-    pub dest_region: Option<String>,
+    /// 复制目标区域,可重复或逗号分隔填多个(每多一个区域,每字节流量费翻一倍)
+    #[arg(long = "dest-region", value_delimiter = ',')]
+    pub dest_regions: Vec<String>,
 
     /// AWS 区域(默认自动解析)
     #[arg(long)]

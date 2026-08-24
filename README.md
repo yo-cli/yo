@@ -47,11 +47,98 @@ yo-s3
 nohup yo-s3 --budget 500 --bucket my-burn-bucket --yes > burn.log 2>&1 &
 
 # 3. 桶还没配跨区复制:先一键配置,再开烧
-yo-s3 setup-crr --bucket my-burn-bucket        # 只问一个目标区域
+yo-s3 setup-crr --bucket my-burn-bucket        # 只问目标区域(可填多个)
 yo-s3 --budget 500 --bucket my-burn-bucket
 ```
 
 中断后续跑:直接重跑同一条命令,发现 checkpoint 会询问(或 `--yes` 自动)继续。
+
+## 烧钱模式(`--mode`)
+
+模式决定**用哪个 AWS 计费项当引擎**;预算记账、限速、断点续跑、清扫等其余机制所有模式共用。
+
+| 模式 | 计费项 | 单价量级 | 能否靠预算精确控停 |
+|------|--------|----------|-------------------|
+| `crr`(默认) | 跨区复制流量 | 约 $0.02/GB × K 个目标区域(默认 K=5),写完即产生 | ✅ 主用模式 |
+| `write-only` | 仅 PUT 请求费 | ~$0.02/TiB,存储费按月发酵 | ❌ 必须配 `--total-size` / `--iterations` / `--max-duration` |
+
+`crr` 模式下若桶未配复制,交互会问是否当场配置;选择不配则自动退化为纯请求费口径,并如实展示"烧不动"。
+
+### 多目标复制:烧钱速度 ×K(默认 K=5)
+
+复制到 K 个目标区域,每个区域各收一次跨区流量费,烧钱速率就是 K 倍:
+
+```bash
+# 不指定就用默认 5 个目标区域 ≈ 5× 速度
+yo-s3 setup-crr --bucket my-burn-bucket
+yo-s3 --budget 500 --bucket my-burn-bucket
+
+# 也可以自己指定
+yo-s3 setup-crr --bucket my-burn-bucket --dest-region us-west-2,eu-west-1
+```
+
+默认目标(源为 us-east-1 时):`us-west-2, eu-west-1, ap-northeast-1, ap-southeast-2, sa-east-1`。全是默认启用的商用区域,源区域会自动排除。opt-in 区域(af-south-1、me-south-1 等)需先在账户里启用才能用。
+
+`--dest-region` 可逗号分隔,也可重复传。目标区域不能与源区域相同(同区复制不产生跨区流量),重复区域会被拒绝。
+
+**费率按区域对算,不是简单乘 K**:基准由源区域决定,但有折扣对——`us-east-1 ↔ us-east-2` 只要 $0.01/GB(标准价一半)。工具会逐个目标查实际费率再求和,预估页也会逐条列出:
+
+```
+  复制目标桶:           5 个
+    · my-burn-bucket-crr-us-west-2  (us-west-2, $0.0200/GB)
+    · my-burn-bucket-crr-eu-west-1  (eu-west-1, $0.0200/GB)
+    ...
+```
+
+所以默认 K=5 的候选里**故意不含 us-east-2**——选它反而因为半价而拖慢烧钱。
+
+注意 K 也放大**存储费**:数据在 1 + K 个桶里各存一份。`--retain` 后台清扫和 `yo-s3 cleanup` 都会覆盖全部目标桶。
+
+### 传输加速:默认自动叠加 +$0.04/GB
+
+`--transfer-acceleration` 默认 `auto`——**能生效且 AWS 会真正计费时自动启用**,不用你操心:
+
+```bash
+# 默认就是 K=5 + 自动加速
+yo-s3 --budget 500 --bucket my-burn-bucket
+```
+
+为什么不是无脑打开:**AWS 判定"加速不会更快"时不收加速费**。而 yo-s3 最常见的跑法就是 EC2 和桶同区(为了吞吐),那种情况下加速费根本不产生。硬开只会让预估里多出一笔永不兑现的钱,导致**提前约 29% 停机**。
+
+`auto` 在下列任一情况下静默退回不启用,并打印一行原因,**不会让运行失败**:
+
+- 客户端与桶同区(AWS 不会计费)
+- 桶名含点号,或用了 `--path-style` / `--endpoint-url`(加速只支持 virtual-hosted 寻址)
+- 桶所在区域不在支持加速的 15 个区域内
+- 桶未启用加速,且处于 `--yes` 无人值守(不擅自改桶配置);交互模式下会问你是否现在开启
+
+想强制或禁用:
+
+```bash
+yo-s3 --transfer-acceleration on    # 强制;不满足条件直接报错
+yo-s3 --transfer-acceleration off   # 完全不用
+```
+
+> 想让加速真正烧钱,客户端要离桶足够远——例如 EC2 在 us-east-1、桶在 ap-southeast-2。
+
+### NAT 网关处理费:自动探测,无需配置
+
+如果 EC2 在私有子网、S3 流量经 NAT 网关出去,每 GB 还有 **$0.045** 的处理费——这是所有项里单价最高的,且在账单上叫 "Data Processed by NAT Gateways",不挂在 S3 名下,很容易漏看。
+
+**你不需要做任何事**:工具启动时自动判断走的是 NAT 还是免费的 S3 Gateway Endpoint,该计的自动计进预算:
+
+```
+⚠ 检测到 S3 流量经 NAT 网关 —— 每字节额外 $0.045/GB,已计入预算。
+  想省掉这笔钱:为该子网加一个免费的 S3 Gateway Endpoint
+```
+
+不在 EC2 上跑、或走公网 IGW 时,不可能有这笔费用,工具**完全不提**。
+
+探测需要 `ec2:DescribeRouteTables` 和 `ec2:DescribeVpcEndpoints` 两个只读权限(见下方 IAM 段)。没有也能跑,只是会提示"无法确认是否走 NAT"。
+
+> 顺带一提:**$0.09/GB 是 Data Transfer Out to Internet 的费率**,和 NAT 处理费是两回事,别混。
+
+模式会写进 checkpoint 快照:**换模式续跑会被拒绝并列出 diff**(两种引擎的已烧金额口径不同,混算会失真)。
 
 ## EC2 凭据(不用配 KEY)
 
@@ -70,13 +157,17 @@ yo-s3 --budget 500 --bucket my-burn-bucket
         "s3:DeleteObject", "s3:DeleteObjectVersion", "s3:GetObject"
       ],
       "Resource": ["arn:aws:s3:::<源桶>", "arn:aws:s3:::<源桶>/*",
-                    "arn:aws:s3:::<目标桶>", "arn:aws:s3:::<目标桶>/*"]
+                    "arn:aws:s3:::<每个目标桶>", "arn:aws:s3:::<每个目标桶>/*"]
     }
   ]
 }
 ```
 
 `setup-crr` 需要额外的一次性较高权限(`s3:CreateBucket`、`s3:PutBucketVersioning`、`s3:PutReplicationConfiguration`、`iam:CreateRole`、`iam:PutRolePolicy`、`iam:GetRole`、`iam:PassRole`),建议在管理员身份下跑一次。
+
+**可选(建议加上)**:`ec2:DescribeRouteTables`、`ec2:DescribeVpcEndpoints` —— 用于自动判断 S3 流量是否经 NAT 网关($0.045/GB)。缺这两个权限工具照常运行,但预算里不会包含 NAT 处理费,实际账单可能偏高。
+
+`--transfer-acceleration` 需要 `s3:GetAccelerateConfiguration`;若要让工具帮你开启加速,还需 `s3:PutAccelerateConfiguration`。
 
 ## 参数说明
 
@@ -86,6 +177,7 @@ yo-s3 --budget 500 --bucket my-burn-bucket
 |------|------|------|
 | `--budget <N>` | 交互询问 | 要烧掉的美元金额,硬上限,烧够即停 |
 | `--bucket <名>` | 交互询问 | 目标 S3 桶 |
+| `--mode` | `crr` | 烧钱模式(成本引擎),见下表 |
 | `--key-prefix` | `yo-s3-bench/` | 所有写入/清理只发生在该前缀下 |
 | `--object-size` | `1TiB` | 单对象大小 |
 | `--part-size` | `256MiB` | multipart 分片大小(S3 限制自动校验) |
@@ -99,6 +191,7 @@ yo-s3 --budget 500 --bucket my-burn-bucket
 | `--checkpoint` | `./yo-s3.ckpt.json` | 每完成一个对象原子写一次;存在即可续跑 |
 | `--summary-out` | `./yo-s3-summary.json` | 结束时的机器可读摘要 |
 | `--report-interval` | `10s` | 运行报告间隔 |
+| `--transfer-acceleration` | `auto` | 传输加速 +$0.04/GB。`auto` 能生效且会真正计费时自动启用 / `on` 强制 / `off` 关闭 |
 | `--endpoint-url` / `--path-style` | 无 | S3 兼容存储(MinIO/Ceph);设 endpoint 自动切 path-style + 兼容校验模式。注意兼容存储无 CRR,烧钱极慢 |
 | `--dry-run` | 关 | 全流程演练,不发任何真实写入 |
 | `--yes` | 关 | 跳过所有确认(无人值守) |

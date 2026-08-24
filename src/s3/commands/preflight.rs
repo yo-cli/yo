@@ -3,9 +3,9 @@
 // estimate + confirmation gate, and the checkpoint resume decision.
 
 use anyhow::{bail, Context, Result};
-use aws_config::SdkConfig;
 use colored::Colorize;
 use std::path::Path;
+use std::sync::Arc;
 use uuid::Uuid;
 
 use super::args::RunArgs;
@@ -14,23 +14,25 @@ use crate::s3::client::{
     build_s3_client, discover_bucket_region, load_shared_config, print_caller_identity,
     resolved_region, ClientOpts,
 };
-use crate::s3::config::BenchConfig;
-use crate::s3::cost::{pricing_for, print_estimate, write_lifecycle_files, Pricing};
-use crate::s3::{crr, fmt_bytes, fmt_usd};
-
-pub struct DestTarget {
-    pub bucket: String,
-    pub client: aws_sdk_s3::Client,
-}
+use crate::s3::config::{AccelMode, BenchConfig};
+use crate::s3::cost::{
+    path_surcharges, pricing_for, print_estimate, write_lifecycle_files, CostModel, Pricing,
+};
+use crate::s3::modes::{BurnMode, ModeCtx};
+use crate::s3::{accel, crr, fmt_bytes, fmt_usd, netpath};
 
 pub struct RunContext {
     pub cfg: BenchConfig,
+    /// Control-plane client: discovery, sweeps, backlog sampling, cleanup.
     pub s3: aws_sdk_s3::Client,
-    pub dest: Option<DestTarget>,
-    /// CRR drives the budget math. True when replication is configured — or in
-    /// --dry-run without it, where the intended engine is simulated so the
-    /// rehearsal terminates like a real run would.
-    pub crr_active: bool,
+    /// Object-upload client. Same as `s3` unless Transfer Acceleration is on,
+    /// in which case it targets the accelerate endpoint.
+    pub upload_s3: aws_sdk_s3::Client,
+    /// The armed cost engine: it owns the replication destination (if any),
+    /// the per-object work, and the live backlog sampling.
+    pub mode: Arc<dyn BurnMode>,
+    /// The armed mode's cost shape, resolved once after preflight.
+    pub cost: CostModel,
     pub pricing: Pricing,
     pub ckpt: Checkpoint,
     pub resumed: bool,
@@ -59,7 +61,8 @@ pub async fn prepare(args: RunArgs) -> Result<RunContext> {
         None => inquire::Text::new("目标 S3 桶名称?").prompt()?,
     };
 
-    let cfg = BenchConfig {
+    let mut cfg = BenchConfig {
+        mode: args.mode,
         bucket,
         key_prefix: args.key_prefix.clone(),
         budget_micro,
@@ -67,6 +70,8 @@ pub async fn prepare(args: RunArgs) -> Result<RunContext> {
         endpoint_url: args.endpoint_url.clone(),
         path_style: args.path_style,
         insecure_skip_tls_verify: args.insecure_skip_tls_verify,
+        // Resolved below, once the bucket's region is known.
+        transfer_acceleration: false,
         object_size: args.object_size,
         part_size: args.part_size,
         pool_size: args.pool_size,
@@ -92,12 +97,17 @@ pub async fn prepare(args: RunArgs) -> Result<RunContext> {
     // --- 2. credentials + clients ---
     let shared = load_shared_config(cfg.region.as_deref()).await;
     print_caller_identity(&shared, cfg.dry_run).await?;
-    let opts = ClientOpts {
+    // The plain client drives every control-plane call (discovery, replication
+    // config, sweeps, backlog sampling). The accelerated upload client is built
+    // at the end, once acceleration is resolved — the accelerate endpoint is an
+    // upload-path thing and does not serve bucket-configuration operations.
+    let plain_opts = ClientOpts {
         endpoint_url: cfg.endpoint_url.clone(),
         path_style: cfg.path_style,
         insecure_skip_tls_verify: cfg.insecure_skip_tls_verify,
+        accelerate: false,
     };
-    let s3 = build_s3_client(&shared, &opts, None)?;
+    let s3 = build_s3_client(&shared, &plain_opts, None)?;
 
     // --- 3. bucket reachability + region (drives the pricing table) ---
     let bucket_region = match discover_bucket_region(&s3, &cfg.bucket).await {
@@ -127,8 +137,7 @@ pub async fn prepare(args: RunArgs) -> Result<RunContext> {
         .unwrap_or_else(|| "us-east-1".to_string());
     let pricing = pricing_for(&pricing_region);
 
-    // --- 4. versioning + CRR detection (AWS only; skipped for S3-compat) ---
-    let mut dest: Option<DestTarget> = None;
+    // --- 4. versioning (retention sweeps depend on it, whatever the mode) ---
     if cfg.endpoint_url.is_none() {
         match crr::versioning_enabled(&s3, &cfg.bucket).await {
             Ok(true) => println!(
@@ -142,16 +151,41 @@ pub async fn prepare(args: RunArgs) -> Result<RunContext> {
                 }
             }
         }
-        dest = resolve_crr(&shared, &s3, &cfg, bucket_region.as_deref()).await?;
-    } else {
-        println!(
-            "{} 自定义端点模式:跨区复制为 AWS 原生特性,此处不可用,退化为纯写入(烧钱极慢)",
-            "⚠".yellow()
-        );
     }
 
-    // No engine + unattended + nothing else bounds the run = it would never stop.
-    if dest.is_none()
+    // --- 5. upload-path surcharges: acceleration + NAT, both auto-resolved ---
+    let accelerate = resolve_acceleration(
+        &s3,
+        &cfg,
+        args.transfer_acceleration,
+        bucket_region.as_deref(),
+        resolved_region(&shared).as_deref(),
+    )
+    .await?;
+    cfg.transfer_acceleration = accelerate;
+    // Detected, never asked: the user should not have to know their VPC
+    // topology for the budget to be right.
+    let egress = netpath::detect(&shared, bucket_region.as_deref()).await;
+    if let Some(line) = egress.describe() {
+        println!("{}", line);
+    }
+
+    // --- 6. arm the burn engine ---
+    let mut mode = cfg.mode.build();
+    mode.preflight(&ModeCtx {
+        shared: &shared,
+        s3: &s3,
+        cfg: &cfg,
+        bucket_region: bucket_region.as_deref(),
+    })
+    .await?;
+    // Engine cost + path surcharges. The mode owns what its engine bills; the
+    // upload path is not its business, so the surcharge is composed on here.
+    let mut cost = mode.cost_model(&pricing);
+    cost.transfer.extend(path_surcharges(cfg.transfer_acceleration, egress));
+
+    // No per-byte fee + unattended + nothing else bounds the run = never stops.
+    if !cost.budget_drives_stop()
         && cfg.yes
         && cfg.total_size.is_none()
         && cfg.iterations.is_none()
@@ -159,26 +193,16 @@ pub async fn prepare(args: RunArgs) -> Result<RunContext> {
         && !cfg.dry_run
     {
         bail!(
-            "未启用跨区复制时纯请求费烧不动预算,运行将永不停止。\
-             请先跑 yo-s3 setup-crr,或提供 --total-size / --iterations / --max-duration 之一作为边界"
+            "模式 {} 当前没有按字节计费的即时成本,纯请求费烧不动预算,运行将永不停止。\
+             请先跑 yo-s3 setup-crr 启用跨区复制,或提供 --total-size / --iterations / --max-duration 之一作为边界",
+            cfg.mode
         );
     }
 
-    // --- 5. estimate + lifecycle files + the confirmation gate ---
-    let crr_assumed_for_dry = cfg.dry_run && dest.is_none() && cfg.endpoint_url.is_none();
-    if crr_assumed_for_dry {
-        println!(
-            "{} dry-run 按「已启用跨区复制」口径模拟烧钱(实跑前先 yo-s3 setup-crr)",
-            "ℹ".blue()
-        );
-    }
-    let crr_active = dest.is_some() || crr_assumed_for_dry;
-    print_estimate(&cfg, &pricing, crr_active, dest.as_ref().map(|d| d.bucket.as_str()));
-    write_lifecycle_files(
-        &cfg.key_prefix,
-        &cfg.bucket,
-        dest.as_ref().map(|d| d.bucket.as_str()),
-    );
+    // --- 7. estimate + lifecycle files + the confirmation gate ---
+    let dest_buckets: Vec<String> = mode.destinations().iter().map(|d| d.bucket.clone()).collect();
+    print_estimate(&cfg, &pricing, mode.as_ref(), &cost);
+    write_lifecycle_files(&cfg.key_prefix, &cfg.bucket, &dest_buckets);
     if cfg.dry_run {
         println!("{} --dry-run:不会发出任何真实写入", "ℹ".blue());
     }
@@ -194,7 +218,7 @@ pub async fn prepare(args: RunArgs) -> Result<RunContext> {
         }
     }
 
-    // --- 6. checkpoint: fresh, or resume with strict snapshot validation ---
+    // --- 8. checkpoint: fresh, or resume with strict snapshot validation ---
     let snapshot = cfg.snapshot();
     let (ckpt, resumed) = if let Some(resume_path) = &args.resume {
         let ckpt = Checkpoint::load(Path::new(resume_path))?;
@@ -241,11 +265,19 @@ pub async fn prepare(args: RunArgs) -> Result<RunContext> {
         );
     }
 
+    let upload_s3 = if cfg.transfer_acceleration {
+        let accel_opts = ClientOpts { accelerate: true, ..plain_opts.clone() };
+        build_s3_client(&shared, &accel_opts, None)?
+    } else {
+        s3.clone()
+    };
+
     Ok(RunContext {
         cfg,
         s3,
-        dest,
-        crr_active,
+        upload_s3,
+        mode: Arc::from(mode),
+        cost,
         pricing,
         ckpt,
         resumed,
@@ -253,79 +285,109 @@ pub async fn prepare(args: RunArgs) -> Result<RunContext> {
     })
 }
 
-/// Detect CRR; when missing, offer to set it up on the spot (interactive only).
-async fn resolve_crr(
-    shared: &SdkConfig,
+/// Decide whether uploads take the accelerate endpoint, and return whether the
+/// $0.04/GB surcharge is actually armed.
+///
+/// The hard part is that AWS bills acceleration only when it decides the
+/// transfer was faster than a direct one — a client in the same region as the
+/// bucket is not charged. So `Auto` refuses to arm a fee that will not land on
+/// the invoice, and every "cannot apply" path degrades to `false` with one
+/// line of explanation instead of failing the run. `On` keeps the strict
+/// behaviour: if the user asked for it explicitly, an impossible setup is an
+/// error rather than a silent downgrade.
+async fn resolve_acceleration(
     s3: &aws_sdk_s3::Client,
     cfg: &BenchConfig,
+    mode: AccelMode,
     bucket_region: Option<&str>,
-) -> Result<Option<DestTarget>> {
-    let detected = match crr::detect(s3, &cfg.bucket).await {
-        Ok(d) => d,
-        Err(e) => {
-            if cfg.dry_run {
-                eprintln!("{} 复制配置读取失败({:#}),--dry-run 继续", "⚠".yellow(), e);
-                return Ok(None);
-            }
+    client_region: Option<&str>,
+) -> Result<bool> {
+    if matches!(mode, AccelMode::Off) {
+        return Ok(false);
+    }
+    let strict = matches!(mode, AccelMode::On);
+
+    // Hard AWS constraints: virtual-hosted only, no dots, AWS endpoints only.
+    if let Err(e) = accel::validate(&cfg.bucket, cfg.path_style, cfg.endpoint_url.as_deref()) {
+        if strict {
             return Err(e);
         }
-    };
+        tracing::debug!("传输加速不适用: {:#}", e);
+        return Ok(false);
+    }
+    if let Some(region) = bucket_region {
+        if !accel::region_supported(region) {
+            if strict {
+                bail!(
+                    "桶所在区域 {} 不支持传输加速。请换到支持的区域,或用 --transfer-acceleration off",
+                    region
+                );
+            }
+            println!(
+                "{} 区域 {} 不支持传输加速,本次不启用",
+                "ℹ".blue(),
+                region
+            );
+            return Ok(false);
+        }
+    }
 
-    let dest_bucket = match detected {
-        Some(info) => {
-            println!("{} 跨区复制已配置 → 目标桶 {}", "✓".green(), info.dest_bucket.bold());
-            Some(info.dest_bucket)
+    // The fee only materializes when acceleration actually helps.
+    if bucket_region.is_some() && bucket_region == client_region {
+        if !strict {
+            println!(
+                "{} 客户端与桶同在 {},AWS 不会收取加速费,本次不启用\
+                 (想用加速请让客户端远离桶所在区域,或强制 --transfer-acceleration on)",
+                "ℹ".blue(),
+                bucket_region.unwrap_or("?")
+            );
+            return Ok(false);
         }
-        None if cfg.dry_run || cfg.yes => {
-            println!("{} 未配置跨区复制(烧钱主引擎缺失)", "⚠".yellow().bold());
-            None
+        accel::warn_if_not_accelerated(bucket_region, client_region);
+    }
+
+    match accel::enabled(s3, &cfg.bucket).await {
+        Ok(true) => {
+            println!("{} 传输加速已开启,计入 +$0.04/GB", "✓".green());
+            Ok(true)
         }
-        None => {
-            println!("{} 未配置跨区复制 —— 它是烧钱主引擎(跨区流量 ~$0.02/GB)", "⚠".yellow().bold());
-            let choice = inquire::Select::new(
-                "怎么处理?",
-                vec![
-                    "现在自动配置(建目标桶+复制规则,推荐)",
-                    "不配置,纯写入继续(烧钱极慢)",
-                    "退出",
-                ],
-            )
-            .prompt()?;
-            match choice {
-                "现在自动配置(建目标桶+复制规则,推荐)" => {
-                    let source_region = bucket_region
-                        .map(|s| s.to_string())
-                        .or_else(|| resolved_region(shared))
-                        .context("无法确定源桶区域,请显式传 --region")?;
-                    let suggested = if source_region == "us-west-2" { "us-east-1" } else { "us-west-2" };
-                    let dest_region = inquire::Text::new("复制目标区域?")
-                        .with_default(suggested)
-                        .prompt()?;
-                    let dest = crr::setup(
-                        shared,
-                        s3,
-                        &cfg.bucket,
-                        &source_region,
-                        &dest_region,
-                        &cfg.key_prefix,
-                    )
-                    .await?;
-                    Some(dest)
+        Ok(false) => {
+            if cfg.yes || cfg.dry_run {
+                // Never mutate bucket config unattended; say exactly how to fix.
+                let hint = format!(
+                    "桶 {} 未开启传输加速。开启:\n  \
+                     aws s3api put-bucket-accelerate-configuration --bucket {} \
+                     --accelerate-configuration Status=Enabled",
+                    cfg.bucket, cfg.bucket
+                );
+                if strict && !cfg.dry_run {
+                    bail!("{}", hint);
                 }
-                "退出" => bail!("已取消"),
-                _ => None,
+                println!("{} {},本次不启用", "ℹ".blue(), hint);
+                Ok(false)
+            } else {
+                let go = inquire::Confirm::new(&format!(
+                    "桶 {} 未开启传输加速。现在开启?(每字节 +$0.04/GB,烧钱更快)",
+                    cfg.bucket
+                ))
+                .with_default(true)
+                .prompt()?;
+                if !go {
+                    if strict {
+                        bail!("已取消:未开启传输加速时请用 --transfer-acceleration off");
+                    }
+                    return Ok(false);
+                }
+                accel::enable(s3, &cfg.bucket).await?;
+                Ok(true)
             }
         }
-    };
-
-    match dest_bucket {
-        None => Ok(None),
-        Some(bucket) => {
-            // Destination may live in another region — build its client there.
-            let dest_region = discover_bucket_region(s3, &bucket).await.unwrap_or(None);
-            let opts = ClientOpts::default();
-            let client = build_s3_client(shared, &opts, dest_region.as_deref())?;
-            Ok(Some(DestTarget { bucket, client }))
+        Err(e) => {
+            if strict && !cfg.dry_run {
+                return Err(e);
+            }
+            eprintln!("{} 传输加速状态读取失败({:#}),本次不启用", "⚠".yellow(), e);
+            Ok(false)
         }
     }
 }
