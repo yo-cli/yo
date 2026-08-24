@@ -12,7 +12,8 @@ use super::args::RunArgs;
 use crate::s3::auth;
 use crate::s3::checkpoint::Checkpoint;
 use crate::s3::client::{
-    build_s3_client, discover_bucket_region, load_shared_config, resolved_region, ClientOpts,
+    build_s3_client, discover_bucket_region, load_shared_config, resolved_region, BucketProbe,
+    ClientOpts,
 };
 use crate::s3::config::{self, AccelMode, BenchConfig};
 use crate::s3::cost::{
@@ -168,14 +169,48 @@ pub async fn prepare(args: RunArgs) -> Result<RunContext> {
 
     // --- 3. bucket reachability + region (drives the pricing table) ---
     let bucket_region = match discover_bucket_region(&s3, &cfg.bucket).await {
-        Ok(r) => {
+        Ok(probe @ BucketProbe::Exists(_)) => {
             println!(
                 "{} 桶 {} 可达{}",
                 "✓".green(),
                 cfg.bucket.bold(),
-                r.as_deref().map(|x| format!("(区域 {})", x)).unwrap_or_default()
+                probe
+                    .region()
+                    .map(|x| format!("(区域 {})", x))
+                    .unwrap_or_default()
             );
-            r
+            probe.region()
+        }
+        // The tool already creates K destination buckets on its own; refusing
+        // to create the one source bucket it is about to fill with disposable
+        // data would be an odd place to stop and send the user to the console.
+        Ok(BucketProbe::Missing) if !cfg.dry_run => {
+            let region = resolved_region(&shared).unwrap_or_else(|| "us-east-1".to_string());
+            println!("{} 桶 {} 不存在", "ℹ".blue(), cfg.bucket.bold());
+            if !cfg.yes {
+                let go = inquire::Confirm::new(&format!(
+                    "现在在 {} 创建它?(源区域决定跨区复制单价与默认目标区域)",
+                    region
+                ))
+                .with_default(true)
+                .prompt()?;
+                if !go {
+                    bail!("已取消:请换一个已存在的 --bucket,或允许创建");
+                }
+            }
+            crr::create_bucket(&s3, &cfg.bucket, &region)
+                .await
+                .with_context(|| {
+                    format!(
+                        "创建桶 {} 失败。排查:桶名是否合法且全球唯一 / 当前身份是否有 s3:CreateBucket",
+                        cfg.bucket
+                    )
+                })?;
+            Some(region)
+        }
+        Ok(BucketProbe::Missing) => {
+            eprintln!("{} 桶 {} 不存在,--dry-run 继续", "⚠".yellow(), cfg.bucket);
+            None
         }
         Err(e) if cfg.dry_run => {
             eprintln!("{} 桶不可达({:#}),--dry-run 继续", "⚠".yellow(), e);

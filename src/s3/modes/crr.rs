@@ -199,7 +199,10 @@ async fn resolve_dest(ctx: &ModeCtx<'_>) -> Result<Vec<DestTarget>> {
     for bucket in dest_buckets {
         // Each destination lives in its own region — build its client there,
         // and keep the region: it decides that destination's transfer rate.
-        let region = discover_bucket_region(ctx.s3, &bucket).await.unwrap_or(None);
+        let region = discover_bucket_region(ctx.s3, &bucket)
+            .await
+            .map(|p| p.region())
+            .unwrap_or(None);
         let client = build_s3_client(ctx.shared, &ClientOpts::default(), region.as_deref())?;
         targets.push(DestTarget {
             bucket,

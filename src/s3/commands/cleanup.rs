@@ -78,7 +78,10 @@ pub async fn run(args: CleanupArgs) -> Result<()> {
     if args.endpoint_url.is_none() {
         if let Ok(dest_buckets) = crr::detect(&s3, &bucket).await {
             for dest_bucket in dest_buckets {
-                let dest_region = discover_bucket_region(&s3, &dest_bucket).await.unwrap_or(None);
+                let dest_region = discover_bucket_region(&s3, &dest_bucket)
+                    .await
+                    .map(|p| p.region())
+                    .unwrap_or(None);
                 let dest_client =
                     build_s3_client(&shared, &ClientOpts::default(), dest_region.as_deref())?;
                 println!("{} 检测到复制目标桶 {},一并清理", "ℹ".blue(), dest_bucket);
@@ -192,7 +195,18 @@ async fn teardown(
         println!("  · IAM 角色 {} 及其内联策略", role);
     }
     // "--all" invites exactly one worry; answer it before asking for a yes.
-    println!("  {}", format!("源桶 {} 本身不会被删除", bucket).dimmed());
+    if plan.source_created {
+        println!(
+            "  · 源桶 {}({})",
+            bucket.bold(),
+            "本工具创建,一并删除".yellow()
+        );
+    } else {
+        println!(
+            "  {}",
+            format!("源桶 {} 不是本工具创建的,不会被删除", bucket).dimmed()
+        );
+    }
 
     let confirmed = args.yes
         || inquire::Confirm::new("确认删除?目标桶会被整桶清空后删除")

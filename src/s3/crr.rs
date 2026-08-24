@@ -144,27 +144,9 @@ pub async fn setup(
         match dest_client.head_bucket().bucket(&dest_bucket).send().await {
             Ok(_) => println!("{} 目标桶 {} 已存在({})", "✓".green(), dest_bucket, dest_region),
             Err(_) => {
-                let mut create = dest_client.create_bucket().bucket(&dest_bucket);
-                // us-east-1 must NOT carry a LocationConstraint
-                if dest_region != "us-east-1" {
-                    create = create.create_bucket_configuration(
-                        CreateBucketConfiguration::builder()
-                            .location_constraint(BucketLocationConstraint::from(
-                                dest_region.as_str(),
-                            ))
-                            .build(),
-                    );
-                }
-                match create.send().await {
-                    Ok(_) => {
-                        mark_created(&dest_client, &dest_bucket).await;
-                        println!("{} 已创建目标桶 {}({})", "✓".green(), dest_bucket, dest_region)
-                    }
-                    Err(e) if e.code() == Some("BucketAlreadyOwnedByYou") => {
-                        println!("{} 目标桶 {} 已存在", "✓".green(), dest_bucket)
-                    }
-                    Err(e) => bail!("创建目标桶 {} 失败: {}", dest_bucket, e),
-                }
+                create_bucket(&dest_client, &dest_bucket, dest_region)
+                    .await
+                    .with_context(|| format!("创建目标桶 {} 失败", dest_bucket))?;
             }
         }
         // 3. versioning on destination
@@ -254,11 +236,17 @@ pub struct TeardownPlan {
     /// Present only if the replication role actually exists.
     pub role_name: Option<String>,
     pub has_replication_config: bool,
+    /// The source bucket carries our tag, i.e. the tool created it rather than
+    /// the user bringing their own. Only then may teardown remove it.
+    pub source_created: bool,
 }
 
 impl TeardownPlan {
     pub fn is_empty(&self) -> bool {
-        self.dests.is_empty() && self.role_name.is_none() && !self.has_replication_config
+        self.dests.is_empty()
+            && self.role_name.is_none()
+            && !self.has_replication_config
+            && !self.source_created
     }
 }
 
@@ -296,6 +284,7 @@ pub async fn teardown_plan(
         has_replication_config,
         dests,
         role_name: role_exists.then_some(role_name),
+        source_created: was_created_by_us(source_client, source_bucket).await,
     })
 }
 
@@ -352,7 +341,28 @@ pub async fn teardown(
         }
     }
 
-    // 3. The inline policy must go before the role it hangs on.
+    // 3. The source bucket, but only when we created it — a bucket the user
+    //    brought along is theirs, tagged or not, and must survive teardown.
+    if plan.source_created {
+        match super::sweep::sweep_versions_before(source_client, source_bucket, "", chrono::Utc::now()).await
+        {
+            Ok(stats) if stats.deleted > 0 => println!(
+                "{} 清空 {}:删除 {} 个版本({})",
+                "✓".green(),
+                source_bucket,
+                stats.deleted,
+                super::fmt_bytes(stats.bytes)
+            ),
+            Ok(_) => {}
+            Err(e) => eprintln!("{} 清空 {} 失败,跳过删桶: {:#}", "✗".red(), source_bucket, e),
+        }
+        match source_client.delete_bucket().bucket(source_bucket).send().await {
+            Ok(_) => println!("{} 已删除源桶 {}(本工具创建)", "✓".green(), source_bucket),
+            Err(e) => eprintln!("{} 删除源桶 {} 失败: {}", "✗".red(), source_bucket, e),
+        }
+    }
+
+    // 4. The inline policy must go before the role it hangs on.
     if let Some(role_name) = &plan.role_name {
         let iam = aws_sdk_iam::Client::new(shared);
         if let Err(e) = iam
@@ -375,6 +385,36 @@ pub async fn teardown(
         }
     }
     Ok(())
+}
+
+/// Create a bucket in `region` and stamp it as ours. Idempotent: a bucket we
+/// already own is reported, not treated as an error.
+pub async fn create_bucket(
+    client: &aws_sdk_s3::Client,
+    bucket: &str,
+    region: &str,
+) -> Result<()> {
+    let mut create = client.create_bucket().bucket(bucket);
+    // us-east-1 must NOT carry a LocationConstraint — AWS rejects it there.
+    if region != "us-east-1" {
+        create = create.create_bucket_configuration(
+            CreateBucketConfiguration::builder()
+                .location_constraint(BucketLocationConstraint::from(region))
+                .build(),
+        );
+    }
+    match create.send().await {
+        Ok(_) => {
+            mark_created(client, bucket).await;
+            println!("{} 已创建桶 {}({})", "✓".green(), bucket.bold(), region);
+            Ok(())
+        }
+        Err(e) if e.code() == Some("BucketAlreadyOwnedByYou") => {
+            println!("{} 桶 {} 已存在", "✓".green(), bucket);
+            Ok(())
+        }
+        Err(e) => bail!("{}", e),
+    }
 }
 
 /// Best effort: a bucket we created but failed to stamp is merely treated as

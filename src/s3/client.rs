@@ -137,16 +137,39 @@ pub fn resolved_region(shared: &SdkConfig) -> Option<String> {
 /// Discover which region a bucket lives in. Works cross-region: HeadBucket
 /// returns the region in its output, and even a 301 redirect error carries an
 /// `x-amz-bucket-region` header.
+pub enum BucketProbe {
+    /// Reachable; carries the region when the API disclosed it.
+    Exists(Option<String>),
+    /// HeadBucket said 404. Distinct from 403 on purpose: 404 means the name is
+    /// free to create, 403 means it exists and is not ours — offering to create
+    /// in that case would just fail with BucketAlreadyExists.
+    Missing,
+}
+
+impl BucketProbe {
+    pub fn region(&self) -> Option<String> {
+        match self {
+            BucketProbe::Exists(r) => r.clone(),
+            BucketProbe::Missing => None,
+        }
+    }
+}
+
 pub async fn discover_bucket_region(
     client: &aws_sdk_s3::Client,
     bucket: &str,
-) -> Result<Option<String>> {
+) -> Result<BucketProbe> {
     match client.head_bucket().bucket(bucket).send().await {
-        Ok(out) => Ok(out.bucket_region().map(|s| s.to_string())),
+        Ok(out) => Ok(BucketProbe::Exists(out.bucket_region().map(|s| s.to_string()))),
         Err(sdk_err) => {
             if let Some(raw) = sdk_err.raw_response() {
+                // A cross-region bucket answers with a redirect that still
+                // names its region — that counts as existing.
                 if let Some(region) = raw.headers().get("x-amz-bucket-region") {
-                    return Ok(Some(region.to_string()));
+                    return Ok(BucketProbe::Exists(Some(region.to_string())));
+                }
+                if raw.status().as_u16() == 404 {
+                    return Ok(BucketProbe::Missing);
                 }
             }
             Err(sdk_err).context(format!("HeadBucket {} 失败", bucket))
