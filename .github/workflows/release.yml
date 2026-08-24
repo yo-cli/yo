@@ -23,7 +23,7 @@ jobs:
       version_changed: ${{ steps.check.outputs.changed }}
       version: ${{ steps.check.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -56,7 +56,7 @@ jobs:
   build-linux:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -83,35 +83,35 @@ jobs:
           cargo build --release --target x86_64-unknown-linux-musl --bin yo-s3
 
       - name: Upload yo-git
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: yo-git-linux
           path: target/x86_64-unknown-linux-musl/release/yo-git
           if-no-files-found: error
 
       - name: Upload yo-s5
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: yo-s5-linux
           path: target/x86_64-unknown-linux-musl/release/yo-s5
           if-no-files-found: error
 
       - name: Upload yo-file
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: yo-file-linux
           path: target/x86_64-unknown-linux-musl/release/yo-file
           if-no-files-found: error
 
       - name: Upload yo-ob
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: yo-ob-linux
           path: target/x86_64-unknown-linux-musl/release/yo-ob
           if-no-files-found: error
 
       - name: Upload yo-s3
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: yo-s3-linux
           path: target/x86_64-unknown-linux-musl/release/yo-s3
@@ -122,10 +122,10 @@ jobs:
     needs: [check-version, build-linux]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
 
@@ -141,7 +141,7 @@ jobs:
         run: git push origin :refs/tags/v${{ needs.check-version.outputs.version }}-dev || true
 
       - name: Create Dev Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ needs.check-version.outputs.version }}-dev
           name: v${{ needs.check-version.outputs.version }}-dev
@@ -217,7 +217,7 @@ jobs:
     if: needs.check-version.outputs.version_changed == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -240,7 +240,7 @@ jobs:
           git push origin "$VERSION"
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
 
@@ -248,7 +248,7 @@ jobs:
         run: ls -R artifacts
 
       - name: Create Stable Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ needs.check-version.outputs.version }}
           name: v${{ needs.check-version.outputs.version }}
