@@ -38,6 +38,9 @@ pub async fn run(args: RunArgs) -> Result<()> {
         mut ckpt,
         resumed,
         run_id,
+        // Held until this function returns: no second instance may share this
+        // budget ledger while we are spending against it.
+        lock: _run_lock,
     } = preflight::prepare(args).await?;
 
     // --- data pool (the only data generation in the whole run) ---

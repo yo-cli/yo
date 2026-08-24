@@ -5,8 +5,8 @@ use clap::{Parser, Subcommand};
 use colored::Colorize;
 use tracing_subscriber::EnvFilter;
 
-use yo_lib::s3::commands::args::{CleanupArgs, RunArgs, SetupCrrArgs};
-use yo_lib::s3::commands::{cleanup, run, setup_crr};
+use yo_lib::s3::commands::args::{CleanupArgs, RunArgs};
+use yo_lib::s3::commands::{cleanup, run};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -29,8 +29,6 @@ struct Cli {
 enum Commands {
     /// 按预算烧钱(默认动作)
     Run(RunArgs),
-    /// 一键配置跨区复制(目标桶 + 版本控制 + 复制角色和规则)
-    SetupCrr(SetupCrrArgs),
     /// 手动清理:abort 残留分段上传 + 物理删除本工具前缀下的对象
     Cleanup(CleanupArgs),
 }
@@ -49,7 +47,6 @@ async fn main() {
     let cli = Cli::parse();
     let result = match cli.command {
         Some(Commands::Run(args)) => run::run(args).await,
-        Some(Commands::SetupCrr(args)) => setup_crr::run(args).await,
         Some(Commands::Cleanup(args)) => cleanup::run(args).await,
         None => run::run(cli.run).await, // 无子命令 = run(零思考默认)
     };

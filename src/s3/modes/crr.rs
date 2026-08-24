@@ -9,6 +9,7 @@ use colored::Colorize;
 
 use super::{BurnMode, DestTarget, ModeCtx, ModeId, ObserveCtx, Observation};
 use crate::s3::client::{build_s3_client, discover_bucket_region, resolved_region, ClientOpts};
+use crate::s3::config::BenchConfig;
 use crate::s3::cost::{crr_per_gb, CostModel, Pricing, TransferFee};
 use crate::s3::crr;
 
@@ -65,7 +66,7 @@ impl BurnMode for CrrMode {
         self.dest = resolve_dest(ctx).await?;
         if self.dest.is_empty() && cfg.dry_run {
             println!(
-                "{} dry-run 按「已启用跨区复制」口径模拟烧钱(实跑前先 yo-s3 setup-crr)",
+                "{} dry-run 按「已启用跨区复制」口径模拟烧钱(实跑时加 --dest-region 自动配好)",
                 "ℹ".blue()
             );
             self.assumed = true;
@@ -121,8 +122,9 @@ impl BurnMode for CrrMode {
     }
 }
 
-/// Detect every replication destination; when there are none, offer to set them
-/// up on the spot (interactive only). Empty = the run degrades to request fees.
+/// Detect every replication destination, and set them up on the spot when the
+/// bucket has none — from `--dest-region` if given, interactively otherwise.
+/// Empty = the run degrades to request fees.
 async fn resolve_dest(ctx: &ModeCtx<'_>) -> Result<Vec<DestTarget>> {
     let cfg = ctx.cfg;
     let detected = match crr::detect(ctx.s3, &cfg.bucket).await {
@@ -143,9 +145,29 @@ async fn resolve_dest(ctx: &ModeCtx<'_>) -> Result<Vec<DestTarget>> {
             detected.len(),
             detected.join(" + ").bold()
         );
+        if !cfg.dest_regions.is_empty() {
+            // Silently ignoring it would leave the user believing they changed
+            // the fan-out — and the burn rate — when they did not.
+            println!(
+                "  {}",
+                "桶上已有复制配置,--dest-region 本次不生效(要改目标区域请先删掉现有复制规则)"
+                    .dimmed()
+            );
+        }
         detected
+    } else if !cfg.dest_regions.is_empty() {
+        // Naming the regions is the authorization: it is the one signal that
+        // says "yes, create buckets and an IAM role in those regions".
+        if !cfg.yes {
+            confirm_provision(cfg, &cfg.dest_regions)?;
+        }
+        provision(ctx, &cfg.dest_regions).await?
     } else if cfg.dry_run || cfg.yes {
-        println!("{} 未配置跨区复制(烧钱主引擎缺失)", "⚠".yellow().bold());
+        println!(
+            "{} 未配置跨区复制(烧钱主引擎缺失)—— 加 {} 可自动配好再开烧",
+            "⚠".yellow().bold(),
+            "--dest-region <区域,区域,...>".bold()
+        );
         Vec::new()
     } else {
         println!(
@@ -162,22 +184,11 @@ async fn resolve_dest(ctx: &ModeCtx<'_>) -> Result<Vec<DestTarget>> {
         )
         .prompt()?;
         match choice {
+            // Picking this and then typing the regions IS the confirmation —
+            // no second y/N on top of it.
             "现在自动配置(建目标桶+复制规则,推荐)" => {
-                let source_region = ctx
-                    .bucket_region
-                    .map(|s| s.to_string())
-                    .or_else(|| resolved_region(ctx.shared))
-                    .context("无法确定源桶区域,请显式传 --region")?;
-                let dest_regions = prompt_dest_regions(&source_region)?;
-                crr::setup(
-                    ctx.shared,
-                    ctx.s3,
-                    &cfg.bucket,
-                    &source_region,
-                    &dest_regions,
-                    &cfg.key_prefix,
-                )
-                .await?
+                let dest_regions = prompt_dest_regions(&source_region(ctx)?)?;
+                provision(ctx, &dest_regions).await?
             }
             "退出" => bail!("已取消"),
             _ => Vec::new(),
@@ -197,6 +208,55 @@ async fn resolve_dest(ctx: &ModeCtx<'_>) -> Result<Vec<DestTarget>> {
         });
     }
     Ok(targets)
+}
+
+fn source_region(ctx: &ModeCtx<'_>) -> Result<String> {
+    ctx.bucket_region
+        .map(|s| s.to_string())
+        .or_else(|| resolved_region(ctx.shared))
+        .context("无法确定源桶区域,请显式传 --region")
+}
+
+/// Spell out every resource about to be created. This is the only gate before
+/// buckets and an IAM role appear in K regions, and nothing in this tool tears
+/// them back down afterwards.
+fn confirm_provision(cfg: &BenchConfig, dest_regions: &[String]) -> Result<()> {
+    let go = inquire::Confirm::new(&format!(
+        "将执行:{} 开版本控制 → 在 {} 各建目标桶并开版本控制 → 创建复制 IAM 角色 → \
+         写入 {} 条复制规则(前缀 {})。每字节将产生 {} 份跨区流量费。继续?",
+        cfg.bucket,
+        dest_regions.join(" / "),
+        dest_regions.len(),
+        cfg.key_prefix,
+        dest_regions.len()
+    ))
+    .with_default(true)
+    .prompt()?;
+    if !go {
+        bail!("已取消");
+    }
+    Ok(())
+}
+
+async fn provision(ctx: &ModeCtx<'_>, dest_regions: &[String]) -> Result<Vec<String>> {
+    let cfg = ctx.cfg;
+    let dest_buckets = crr::setup(
+        ctx.shared,
+        ctx.s3,
+        &cfg.bucket,
+        &source_region(ctx)?,
+        dest_regions,
+        &cfg.key_prefix,
+    )
+    .await?;
+    println!(
+        "{} 跨区复制配置完成 → {} 个目标({}),烧钱速率 {}×",
+        "✓".green().bold(),
+        dest_buckets.len(),
+        dest_buckets.join(" + "),
+        dest_buckets.len()
+    );
+    Ok(dest_buckets)
 }
 
 /// Default fan-out width. Five destinations burn ~5× faster than one while

@@ -1,6 +1,6 @@
 [package]
 name = "yo"
-version = "1.1.51"
+version = "1.1.52"
 edition = "2021"
 authors = ["Your Name <you@example.com>"]
 description = "A multi-functional command-line tool with GitHub SSH key management and SOCKS5 proxy"
@@ -110,8 +110,10 @@ async-trait = "0.1"
 tokio = { version = "1", features = ["full", "test-util"] }
 
 [target.'cfg(unix)'.dependencies]
-# Unix system calls
-nix = { version = "0.29", features = ["user"] }
+# Unix system calls. "fs" carries flock, the yo-s3 single-instance guard: the
+# kernel releases it when the holder dies (kill -9 included), so there is no
+# stale lock to detect and no PID-liveness heuristic to get wrong.
+nix = { version = "0.29", features = ["user", "fs"] }
 
 [profile.release]
 opt-level = 3

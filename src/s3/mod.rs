@@ -14,6 +14,7 @@ pub mod config;
 pub mod cost;
 pub mod crr;
 pub mod limiter;
+pub mod lock;
 pub mod metrics;
 pub mod modes;
 pub mod netpath;

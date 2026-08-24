@@ -46,9 +46,11 @@ yo-s3
 # 2. 无人值守烧 $500(桶已配好跨区复制;nohup 后台跑,进度看日志)
 nohup yo-s3 --budget 500 --bucket my-burn-bucket --yes > burn.log 2>&1 &
 
-# 3. 桶还没配跨区复制:先一键配置,再开烧
-yo-s3 setup-crr --bucket my-burn-bucket        # 只问目标区域(可填多个)
+# 3. 桶还没配跨区复制:交互式跑会当场问你要不要配,配完接着烧
 yo-s3 --budget 500 --bucket my-burn-bucket
+
+# 4. 无人值守 + 桶还没配复制:点名目标区域,它自动配好再开烧
+yo-s3 --budget 500 --bucket my-burn-bucket --dest-region us-west-2,eu-west-1 --yes
 ```
 
 中断后续跑:直接重跑同一条命令,发现 checkpoint 会询问(或 `--yes` 自动)继续。
@@ -69,13 +71,14 @@ yo-s3 --budget 500 --bucket my-burn-bucket
 复制到 K 个目标区域,每个区域各收一次跨区流量费,烧钱速率就是 K 倍:
 
 ```bash
-# 不指定就用默认 5 个目标区域 ≈ 5× 速度
-yo-s3 setup-crr --bucket my-burn-bucket
+# 交互式:未配复制时会问你,默认填好 5 个目标区域 ≈ 5× 速度,可自行增删
 yo-s3 --budget 500 --bucket my-burn-bucket
 
-# 也可以自己指定
-yo-s3 setup-crr --bucket my-burn-bucket --dest-region us-west-2,eu-west-1
+# 无人值守:点名区域即授权它自动建桶配规则
+yo-s3 --budget 500 --bucket my-burn-bucket --dest-region us-west-2,eu-west-1 --yes
 ```
+
+配置发生在成本预估页**之前**,所以「只配好复制、这次先不烧」也不需要单独的命令:跑一次不带 `--yes` 的命令,配完后在最后的确认门答 `n` 即可。
 
 默认目标(源为 us-east-1 时):`us-west-2, eu-west-1, ap-northeast-1, ap-southeast-2, sa-east-1`。全是默认启用的商用区域,源区域会自动排除。opt-in 区域(af-south-1、me-south-1 等)需先在账户里启用才能用。
 
@@ -163,7 +166,9 @@ yo-s3 --transfer-acceleration off   # 完全不用
 }
 ```
 
-`setup-crr` 需要额外的一次性较高权限(`s3:CreateBucket`、`s3:PutBucketVersioning`、`s3:PutReplicationConfiguration`、`iam:CreateRole`、`iam:PutRolePolicy`、`iam:GetRole`、`iam:PassRole`),建议在管理员身份下跑一次。
+**自动配置跨区复制**(交互确认或 `--dest-region`)需要额外的一次性较高权限(`s3:CreateBucket`、`s3:PutBucketVersioning`、`s3:PutBucketTagging`、`s3:PutReplicationConfiguration`、`iam:CreateRole`、`iam:PutRolePolicy`、`iam:GetRole`、`iam:PassRole`),建议用管理员身份先跑一次把复制配好;之后的烧钱运行只需下面的常规权限。
+
+**`cleanup --all`** 还需要拆除权限:`s3:GetBucketTagging`、`s3:DeleteBucket`、`s3:DeleteBucketReplication`、`iam:DeleteRole`、`iam:DeleteRolePolicy`。
 
 **可选(建议加上)**:`ec2:DescribeRouteTables`、`ec2:DescribeVpcEndpoints` —— 用于自动判断 S3 流量是否经 NAT 网关($0.045/GB)。缺这两个权限工具照常运行,但预算里不会包含 NAT 处理费,实际账单可能偏高。
 
@@ -178,7 +183,8 @@ yo-s3 --transfer-acceleration off   # 完全不用
 | `--budget <N>` | 交互询问 | 要烧掉的美元金额,硬上限,烧够即停 |
 | `--bucket <名>` | 交互询问 | 目标 S3 桶 |
 | `--mode` | `crr` | 烧钱模式(成本引擎),见下表 |
-| `--key-prefix` | `yo-s3-bench/` | 所有写入/清理只发生在该前缀下 |
+| `--key-prefix` | `yo-s3-bench/` | 所有写入/清理只发生在该前缀下;也是单实例锁与状态目录的身份之一 |
+| `--dest-region` | 无 | 跨区复制目标区域(逗号分隔)。桶未配复制时,给了它就自动建目标桶+IAM角色+复制规则再开烧;已配则以现有配置为准 |
 | `--object-size` | `1TiB` | 单对象大小 |
 | `--part-size` | `256MiB` | multipart 分片大小(S3 限制自动校验) |
 | `--pool-size` | `2GiB` | 常驻内存随机数据池(须 ≥ 2×part) |
@@ -188,12 +194,46 @@ yo-s3 --transfer-acceleration off   # 完全不用
 | `--rate-resample-interval` | `30s` | continuous 模式换速间隔 |
 | `--retain` | `24h` | 对象保留时长,后台每 10 分钟物理删除超期版本(源桶+目标桶);`0s` = 永不删 |
 | `--total-size` / `--iterations` / `--max-duration` | 无 | 可选边界;`--stop-when any` 时任一先到即停 |
-| `--checkpoint` | `./yo-s3.ckpt.json` | 每完成一个对象原子写一次;存在即可续跑 |
-| `--summary-out` | `./yo-s3-summary.json` | 结束时的机器可读摘要 |
+| `--checkpoint` | 状态目录下 `ckpt.json` | 每完成一个对象原子写一次;存在即可续跑 |
+| `--summary-out` | 状态目录下 `summary.json` | 结束时的机器可读摘要 |
 | `--report-interval` | `10s` | 运行报告间隔 |
 | `--transfer-acceleration` | `auto` | 传输加速 +$0.04/GB。`auto` 能生效且会真正计费时自动启用 / `on` 强制 / `off` 关闭 |
 | `--endpoint-url` / `--path-style` | 无 | S3 兼容存储(MinIO/Ceph);设 endpoint 自动切 path-style + 兼容校验模式。注意兼容存储无 CRR,烧钱极慢 |
 | `--dry-run` | 关 | 全流程演练,不发任何真实写入 |
 | `--yes` | 关 | 跳过所有确认(无人值守) |
 
-子命令:`setup-crr`(一键配跨区复制)、`cleanup`(手动清残留分段上传 + 物理删除本工具前缀下对象,源/目标桶都清)。
+子命令只剩一个:`cleanup`(手动清残留分段上传 + 物理删除本工具前缀下对象,源/目标桶都清)。跨区复制的配置已并入主命令,见 `--dest-region`。
+
+## 用完收摊:`cleanup --all`
+
+自动配置跨区复制会在你账号里留下东西:**K 个目标桶**(`<源桶>-crr-<region>`)、**一个 IAM 角色**(`yo-s3-crr-<源桶>`)+ 内联策略、**源桶上的 K 条复制规则**。不加 `--all` 的 `cleanup` 只删对象,这些会一直留着。
+
+```bash
+# 只删对象(目标桶和角色保留,下次还能接着烧)
+yo-s3 cleanup --bucket my-burn-bucket
+
+# 连基础设施一起拆干净
+yo-s3 cleanup --bucket my-burn-bucket --all
+```
+
+拆除顺序:删源桶复制规则 → 整桶清空目标桶 → 删目标桶 → 删角色策略 → 删角色。先停复制再删桶,否则期间新写的对象还在往即将消失的桶里流。
+
+几点要知道:
+
+- **目标桶会被整桶清空**,不只是本工具前缀 —— `DeleteBucket` 要求桶完全为空
+- 工具给**自己创建**的目标桶打了 `yo-s3-created` 标签。目标桶名是从源桶名推导的,可能撞上你原本就有的同名桶;拆除前的清单会把这类桶单独标出来(`非本工具创建`),让你看清楚再决定
+- 源桶的版本控制**不会**被关掉(那是你自己的桶,且版本控制只能暂停不能移除)
+- 不可恢复,默认要交互确认;`--yes` 可跳过
+- 自定义端点(MinIO/Ceph)下 `--all` 直接报错:那里本来就没有跨区复制
+
+## 状态存储与单实例护栏
+
+运行状态放在 **`~/.yo/s3/<桶>-<哈希>/`**:`ckpt.json`(断点续跑)、`summary.json`、`run.lock`。目录身份是 `(endpoint, bucket, key-prefix)` 的哈希 —— 一本预算账对应一个目录,跟你在哪个工作目录敲命令无关。
+
+- **同桶同前缀只允许一个实例在跑**。第二个会在任何 AWS 调用之前被拒,并告诉你谁在跑(pid / 主机 / 已运行多久)。因为两个实例各记各的账,`--budget` 的硬上限会被花掉两遍
+- 想并行请给每个实例换一个 `--key-prefix`,各自独立的预算与清扫范围。`run` 没有 `--force` 后门
+- `cleanup` 拿同一把锁:有实例在跑时拒绝执行(它会 abort 对方的在途分段),`--force` 才放行
+- 锁用 `flock`,进程被 `kill -9` 也由内核释放,不存在需要手动清的陈旧锁
+- **仅防本机**:两台机器打同一个桶+前缀仍会各花各的预算,这种场景请给每台一个独立前缀
+- `--dry-run` 用独立子目录,演练的账永远进不了真账本
+- 早期版本写在 `./yo-s3.ckpt.json`;当前目录下有旧文件时会自动接管并提示新位置

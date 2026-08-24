@@ -295,7 +295,7 @@ pub fn print_estimate(cfg: &BenchConfig, pricing: &Pricing, mode: &dyn BurnMode,
             fmt_usd(budget),
             fmt_bytes((budget as f64 / usd_per_tib as f64 * super::TIB as f64) as u64)
         );
-        println!("  存储费按月缓慢发酵,无法在运行期精确控停。建议先跑 yo-s3 setup-crr。");
+        println!("  存储费按月缓慢发酵,无法在运行期精确控停。建议加 --dest-region 启用跨区复制。");
     }
 }
 

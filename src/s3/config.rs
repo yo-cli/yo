@@ -1,7 +1,11 @@
-// Resolved run configuration + validation + the snapshot embedded in checkpoints.
+// Resolved run configuration + validation + the snapshot embedded in
+// checkpoints + where a run's state lives on disk.
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::modes::ModeId;
@@ -49,6 +53,10 @@ pub struct BenchConfig {
     pub bucket: String,
     pub key_prefix: String,
     pub budget_micro: u64,
+    /// Replication destinations to create when the bucket has none yet.
+    /// Naming them is what authorizes the tool to provision (buckets + IAM
+    /// role) unattended; a bucket that already replicates ignores this.
+    pub dest_regions: Vec<String>,
     pub region: Option<String>,
     pub endpoint_url: Option<String>,
     pub path_style: bool,
@@ -229,6 +237,78 @@ impl ConfigSnapshot {
     }
 }
 
+/// Where a run keeps its state: checkpoint, summary, single-instance lock.
+///
+/// The identity is `(endpoint, bucket, key_prefix)` — the thing one budget
+/// ledger belongs to. The old default keyed it on the working directory
+/// (`./yo-s3.ckpt.json`), which meant two runs launched from two directories
+/// kept two ledgers against one budget and quietly burned it twice.
+///
+/// Pure path computation; `ensure_state_dir` creates it.
+pub fn state_dir(
+    endpoint_url: Option<&str>,
+    bucket: &str,
+    key_prefix: &str,
+    dry_run: bool,
+) -> Result<PathBuf> {
+    let home = dirs_next::home_dir().context("无法定位 home 目录,状态目录 ~/.yo/s3 不可用")?;
+    let mut hasher = Sha256::new();
+    for part in [endpoint_url.unwrap_or(""), bucket, key_prefix] {
+        hasher.update(part.as_bytes());
+        hasher.update([0u8]); // separator: ("a","bc") must not collide with ("ab","c")
+    }
+    let digest = hasher.finalize();
+    let id: String = digest[..4].iter().map(|b| format!("{:02x}", b)).collect();
+
+    let mut dir = home
+        .join(".yo")
+        .join("s3")
+        .join(format!("{}-{}", dir_safe(bucket), id));
+    if dry_run {
+        // A rehearsal must never touch the real ledger: --dry-run still walks
+        // the scheduler and books the burn of objects it never uploaded, so
+        // sharing a state dir would write money that was never spent into the
+        // real checkpoint. Its own directory also means a dry run neither
+        // takes nor waits on the real run's lock.
+        dir.push("dry-run");
+    }
+    Ok(dir)
+}
+
+/// Create the state directory, private to the user like `~/.yo/github`.
+pub fn ensure_state_dir(dir: &Path) -> Result<()> {
+    fs::create_dir_all(dir).with_context(|| format!("创建状态目录失败: {}", dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("设置状态目录权限失败: {}", dir.display()))?;
+    }
+    Ok(())
+}
+
+/// Keep a bucket name readable as a directory component. Custom endpoints
+/// (MinIO/Ceph) do not enforce S3 bucket naming, so nothing here is assumed;
+/// the hash appended by `state_dir` carries the actual identity.
+fn dir_safe(bucket: &str) -> String {
+    let safe: String = bucket
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(40)
+        .collect();
+    if safe.is_empty() {
+        "bucket".to_string()
+    } else {
+        safe
+    }
+}
+
 /// Parse a human size like "1TiB" / "256MiB" / "2GB" into bytes.
 pub fn parse_size(s: &str) -> Result<u64, String> {
     byte_unit::Byte::parse_str(s, true)
@@ -271,6 +351,7 @@ mod tests {
             bucket: "b".into(),
             key_prefix: "yo-s3-bench/".into(),
             budget_micro: 500_000_000,
+            dest_regions: Vec::new(),
             region: None,
             endpoint_url: None,
             path_style: false,
@@ -354,6 +435,43 @@ mod tests {
         let d = a.diff(&c.snapshot());
         assert_eq!(d.len(), 1);
         assert!(d[0].contains("transfer_acceleration"), "{:?}", d);
+    }
+
+    /// One budget ledger per (endpoint, bucket, prefix) — and the same inputs
+    /// must always land on the same directory, or a resume silently restarts
+    /// from zero and burns the budget again.
+    #[test]
+    fn state_dir_identity_is_endpoint_bucket_prefix() {
+        let d = |b, p| state_dir(None, b, p, false).unwrap();
+        assert_eq!(d("bkt", "yo-s3-bench/"), d("bkt", "yo-s3-bench/"));
+        assert_ne!(d("bkt", "yo-s3-bench/"), d("bkt", "other/"));
+        assert_ne!(d("bkt", "yo-s3-bench/"), d("other-bkt", "yo-s3-bench/"));
+        assert_ne!(
+            state_dir(None, "bkt", "p/", false).unwrap(),
+            state_dir(Some("http://minio:9000"), "bkt", "p/", false).unwrap()
+        );
+        // Field boundaries must be real: ("ab","c/") is not ("a","bc/").
+        assert_ne!(d("ab", "c/"), d("a", "bc/"));
+    }
+
+    /// A dry run books burn for objects it never uploaded, so it must not be
+    /// able to reach the real checkpoint or the real lock.
+    #[test]
+    fn dry_run_state_is_isolated() {
+        let real = state_dir(None, "bkt", "p/", false).unwrap();
+        let dry = state_dir(None, "bkt", "p/", true).unwrap();
+        assert_ne!(real, dry);
+        assert!(dry.starts_with(&real));
+    }
+
+    /// Custom endpoints do not enforce S3 bucket naming, so the bucket string
+    /// must never be able to walk out of ~/.yo/s3.
+    #[test]
+    fn bucket_name_stays_one_path_component() {
+        let dir = state_dir(None, "../../etc/evil", "p/", false).unwrap();
+        let root = dirs_next::home_dir().unwrap().join(".yo").join("s3");
+        assert_eq!(dir.parent().unwrap(), root);
+        assert!(!dir.file_name().unwrap().to_string_lossy().contains('/'));
     }
 
     #[test]

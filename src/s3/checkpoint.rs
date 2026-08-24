@@ -44,9 +44,16 @@ impl Checkpoint {
         }
     }
 
-    /// Atomic write: serialize to `<path>.tmp`, fsync, then rename over `path`.
+    /// Atomic write: serialize to a temp file, fsync, then rename over `path`.
+    /// The temp name carries the pid so that even a run forced past the
+    /// single-instance lock cannot have two processes writing one temp file —
+    /// the second one's `create` truncates what the first is about to rename.
     pub fn save(&self, path: &Path) -> Result<()> {
-        let tmp = path.with_extension("json.tmp");
+        let tmp = path.with_file_name(format!(
+            "{}.{}.tmp",
+            path.file_name().unwrap_or_default().to_string_lossy(),
+            std::process::id()
+        ));
         let json = serde_json::to_string_pretty(self)?;
         {
             use std::io::Write;
@@ -124,7 +131,12 @@ mod tests {
         ckpt.completed_iterations = 3;
         ckpt.burned_micro = 123_456;
         ckpt.save(&path).unwrap();
-        assert!(!path.with_extension("json.tmp").exists());
+        let tmp = path.with_file_name(format!(
+            "{}.{}.tmp",
+            path.file_name().unwrap().to_string_lossy(),
+            std::process::id()
+        ));
+        assert!(!tmp.exists());
 
         let loaded = Checkpoint::load(&path).unwrap();
         assert_eq!(loaded.completed_iterations, 3);

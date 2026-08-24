@@ -28,6 +28,12 @@ pub struct RunArgs {
     #[arg(long, default_value = "yo-s3-bench/")]
     pub key_prefix: String,
 
+    /// 跨区复制目标区域,可重复或逗号分隔。桶还没配复制时,给了它就自动配好
+    /// (建目标桶 + IAM 角色 + 复制规则)再开烧;每多一个区域烧钱速度加一倍。
+    /// 桶上已有复制配置时以现有配置为准,此参数不生效
+    #[arg(long = "dest-region", value_delimiter = ',')]
+    pub dest_regions: Vec<String>,
+
     /// AWS 区域(默认走凭据链/EC2 元数据自动解析)
     #[arg(long)]
     pub region: Option<String>,
@@ -88,17 +94,17 @@ pub struct RunArgs {
     #[arg(long, value_parser = parse_duration)]
     pub max_duration: Option<Duration>,
 
-    /// checkpoint 文件路径(存在时启动会询问是否续跑)
-    #[arg(long, default_value = "./yo-s3.ckpt.json")]
-    pub checkpoint: String,
+    /// checkpoint 文件路径(默认 ~/.yo/s3/<桶>-<哈希>/ckpt.json,存在时启动会询问是否续跑)
+    #[arg(long)]
+    pub checkpoint: Option<String>,
 
     /// 显式从指定 checkpoint 续跑
     #[arg(long)]
     pub resume: Option<String>,
 
-    /// 结束时 JSON 摘要输出路径
-    #[arg(long, default_value = "./yo-s3-summary.json")]
-    pub summary_out: String,
+    /// 结束时 JSON 摘要输出路径(默认 ~/.yo/s3/<桶>-<哈希>/summary.json)
+    #[arg(long)]
+    pub summary_out: Option<String>,
 
     /// 运行报告打印间隔
     #[arg(long, value_parser = parse_duration, default_value = "10s")]
@@ -137,29 +143,6 @@ pub struct RunArgs {
 }
 
 #[derive(Args, Debug, Clone)]
-pub struct SetupCrrArgs {
-    /// 源桶(省略时交互询问)
-    #[arg(long)]
-    pub bucket: Option<String>,
-
-    /// 复制目标区域,可重复或逗号分隔填多个(每多一个区域,每字节流量费翻一倍)
-    #[arg(long = "dest-region", value_delimiter = ',')]
-    pub dest_regions: Vec<String>,
-
-    /// AWS 区域(默认自动解析)
-    #[arg(long)]
-    pub region: Option<String>,
-
-    /// 复制规则只覆盖该前缀
-    #[arg(long, default_value = "yo-s3-bench/")]
-    pub key_prefix: String,
-
-    /// 跳过确认
-    #[arg(long, short = 'y')]
-    pub yes: bool,
-}
-
-#[derive(Args, Debug, Clone)]
 pub struct CleanupArgs {
     /// 目标桶(省略时交互询问)
     #[arg(long)]
@@ -184,6 +167,15 @@ pub struct CleanupArgs {
     /// 跳过 TLS 证书验证(仅自建 http 测试环境)
     #[arg(long)]
     pub insecure_skip_tls_verify: bool,
+
+    /// 把自动配置跨区复制时建的东西一起删掉:复制规则 + 目标桶(整桶清空后删除)
+    /// + 复制 IAM 角色。不加时只删对象,这些会一直留在账号里。源桶本身永不删除
+    #[arg(long)]
+    pub all: bool,
+
+    /// 即使检测到同桶同前缀有实例在跑也强制清理(会 abort 它的在途分段)
+    #[arg(long)]
+    pub force: bool,
 
     /// 跳过确认
     #[arg(long, short = 'y')]

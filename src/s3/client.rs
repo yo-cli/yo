@@ -9,7 +9,7 @@ use aws_sdk_s3::config::RequestChecksumCalculation;
 use colored::Colorize;
 use std::time::Duration;
 
-/// Connection options shared by run / setup-crr / cleanup.
+/// Connection options shared by run / cleanup.
 #[derive(Debug, Clone, Default)]
 pub struct ClientOpts {
     pub endpoint_url: Option<String>,

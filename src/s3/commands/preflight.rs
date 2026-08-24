@@ -4,7 +4,7 @@
 
 use anyhow::{bail, Context, Result};
 use colored::Colorize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -14,12 +14,16 @@ use crate::s3::client::{
     build_s3_client, discover_bucket_region, load_shared_config, print_caller_identity,
     resolved_region, ClientOpts,
 };
-use crate::s3::config::{AccelMode, BenchConfig};
+use crate::s3::config::{self, AccelMode, BenchConfig};
 use crate::s3::cost::{
     path_surcharges, pricing_for, print_estimate, write_lifecycle_files, CostModel, Pricing,
 };
+use crate::s3::lock::{self, Acquired, RunLock};
 use crate::s3::modes::{BurnMode, ModeCtx};
 use crate::s3::{accel, crr, fmt_bytes, fmt_usd, netpath};
+
+/// Where a pre-`~/.yo/s3` version of the tool kept its checkpoint.
+const LEGACY_CHECKPOINT: &str = "./yo-s3.ckpt.json";
 
 pub struct RunContext {
     pub cfg: BenchConfig,
@@ -37,6 +41,9 @@ pub struct RunContext {
     pub ckpt: Checkpoint,
     pub resumed: bool,
     pub run_id: Uuid,
+    /// Single-instance guard, held for the whole run and never read: dropping
+    /// it (or dying) is what releases the state directory.
+    pub lock: RunLock,
 }
 
 pub async fn prepare(args: RunArgs) -> Result<RunContext> {
@@ -61,10 +68,19 @@ pub async fn prepare(args: RunArgs) -> Result<RunContext> {
         None => inquire::Text::new("目标 S3 桶名称?").prompt()?,
     };
 
+    // --- 1.5 state directory: checkpoint + summary + the lock all live here ---
+    let state = config::state_dir(
+        args.endpoint_url.as_deref(),
+        &bucket,
+        &args.key_prefix,
+        args.dry_run,
+    )?;
+
     let mut cfg = BenchConfig {
         mode: args.mode,
         bucket,
         key_prefix: args.key_prefix.clone(),
+        dest_regions: args.dest_regions.clone(),
         budget_micro,
         region: args.region.clone(),
         endpoint_url: args.endpoint_url.clone(),
@@ -86,13 +102,41 @@ pub async fn prepare(args: RunArgs) -> Result<RunContext> {
         iterations: args.iterations,
         stop_when: args.stop_when,
         max_duration: args.max_duration,
-        checkpoint_path: args.checkpoint.clone(),
-        summary_out: args.summary_out.clone(),
+        checkpoint_path: resolve_checkpoint(
+            args.checkpoint.as_deref(),
+            args.resume.as_deref(),
+            &state,
+            args.dry_run,
+        ),
+        summary_out: args
+            .summary_out
+            .clone()
+            .unwrap_or_else(|| path_string(state.join("summary.json"))),
         report_interval: args.report_interval,
         dry_run: args.dry_run,
         yes: args.yes,
     };
     cfg.validate()?;
+
+    // The lock is taken before the first AWS call on purpose: a second instance
+    // must be turned away before it can enable acceleration on the bucket or
+    // create replication destinations, let alone spend.
+    config::ensure_state_dir(&state)?;
+    let run_lock = match lock::try_acquire(&state, "yo-s3 run")? {
+        Acquired::Held(l) => l,
+        Acquired::Busy(holder) => bail!(
+            "已有 {} 在跑,拒绝启动第二个实例。\n  \
+             两个实例各记各的账,{} 的硬上限会被花掉两遍。\n  \
+             确认它已结束后重试;真要并行请换一个 --key-prefix(各自独立的预算与清扫范围)",
+            holder,
+            fmt_usd(cfg.budget_micro)
+        ),
+    };
+    println!(
+        "{} 单实例锁已获取: {}(仅防本机重复启动;多台机器打同一桶+前缀仍会各花各的预算)",
+        "✓".green(),
+        state.display()
+    );
 
     // --- 2. credentials + clients ---
     let shared = load_shared_config(cfg.region.as_deref()).await;
@@ -194,7 +238,8 @@ pub async fn prepare(args: RunArgs) -> Result<RunContext> {
     {
         bail!(
             "模式 {} 当前没有按字节计费的即时成本,纯请求费烧不动预算,运行将永不停止。\
-             请先跑 yo-s3 setup-crr 启用跨区复制,或提供 --total-size / --iterations / --max-duration 之一作为边界",
+             请加 --dest-region <区域,区域,...> 让它自动配好跨区复制,\
+             或提供 --total-size / --iterations / --max-duration 之一作为边界",
             cfg.mode
         );
     }
@@ -282,7 +327,44 @@ pub async fn prepare(args: RunArgs) -> Result<RunContext> {
         ckpt,
         resumed,
         run_id,
+        lock: run_lock,
     })
+}
+
+fn path_string(path: PathBuf) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+/// An explicit `--checkpoint` wins. Otherwise the state directory — except
+/// when an older version left a checkpoint in the working directory: adopting
+/// it keeps a multi-day run resumable instead of silently restarting from zero,
+/// which would burn the budget a second time.
+fn resolve_checkpoint(
+    explicit: Option<&str>,
+    resume: Option<&str>,
+    state: &Path,
+    dry_run: bool,
+) -> String {
+    if let Some(p) = explicit {
+        return p.to_string();
+    }
+    // --resume names the ledger being continued, so progress belongs back in
+    // it. Writing elsewhere would leave the next --resume reading a stale file.
+    if let Some(p) = resume {
+        return p.to_string();
+    }
+    let default = state.join("ckpt.json");
+    // Never for a dry run: its fake burn must not reach the real ledger.
+    if !dry_run && !default.exists() && Path::new(LEGACY_CHECKPOINT).exists() {
+        println!(
+            "{} 沿用当前目录的旧 checkpoint {}(新的默认位置是 {})",
+            "ℹ".blue(),
+            LEGACY_CHECKPOINT,
+            default.display()
+        );
+        return LEGACY_CHECKPOINT.to_string();
+    }
+    path_string(default)
 }
 
 /// Decide whether uploads take the accelerate endpoint, and return whether the
