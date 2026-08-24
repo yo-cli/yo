@@ -8,17 +8,23 @@
 // holder dies, `kill -9` included, so there is no stale lock to detect and no
 // liveness heuristic to get wrong.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use chrono::{DateTime, Utc};
-use colored::Colorize;
-use nix::errno::Errno;
-use nix::fcntl::{Flock, FlockArg};
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
+use {
+    anyhow::Context,
+    colored::Colorize,
+    nix::errno::Errno,
+    nix::fcntl::{Flock, FlockArg},
+    std::fs::{File, OpenOptions},
+    std::io::{Read, Seek, Write},
+};
+
+#[cfg(unix)]
 const LOCK_FILE: &str = "run.lock";
 
 /// Written into the lock file once the lock is held, so whoever gets refused
@@ -33,8 +39,10 @@ struct Holder {
 
 /// Held for as long as the guarded work runs. Released on drop — and by the
 /// kernel if the process never gets to drop it.
+#[derive(Default)]
 pub struct RunLock {
     /// `None` when the filesystem cannot lock; see `try_acquire`.
+    #[cfg(unix)]
     _flock: Option<Flock<File>>,
 }
 
@@ -72,8 +80,16 @@ impl fmt::Display for HolderInfo {
     }
 }
 
+/// yo-s3 only runs on Linux (specs/yo_s3.md §11). This stub exists so `yo_lib`
+/// still builds for the Windows `yo-git` target, where no burn ever runs.
+#[cfg(not(unix))]
+pub fn try_acquire(_dir: &Path, _cmd: &str) -> Result<Acquired> {
+    Ok(Acquired::Held(RunLock::default()))
+}
+
 /// Take the exclusive lock on `dir`. `cmd` names this process in the lock file
 /// for whoever gets refused next. `dir` must already exist.
+#[cfg(unix)]
 pub fn try_acquire(dir: &Path, cmd: &str) -> Result<Acquired> {
     let path = dir.join(LOCK_FILE);
     let file = OpenOptions::new()
@@ -102,7 +118,7 @@ pub fn try_acquire(dir: &Path, cmd: &str) -> Result<Acquired> {
                 path.display(),
                 errno
             );
-            return Ok(Acquired::Held(RunLock { _flock: None }));
+            return Ok(Acquired::Held(RunLock::default()));
         }
     };
 
@@ -116,6 +132,7 @@ pub fn try_acquire(dir: &Path, cmd: &str) -> Result<Acquired> {
     }))
 }
 
+#[cfg(unix)]
 fn write_holder(flock: &mut Flock<File>, cmd: &str) -> Result<()> {
     let holder = Holder {
         cmd: cmd.to_string(),
@@ -134,6 +151,7 @@ fn write_holder(flock: &mut Flock<File>, cmd: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn read_holder(mut file: File) -> Option<Holder> {
     let mut buf = String::new();
     file.read_to_string(&mut buf).ok()?;
@@ -145,7 +163,7 @@ fn elapsed_since(started_at: DateTime<Utc>) -> String {
     humantime::format_duration(std::time::Duration::from_secs(secs)).to_string()
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
