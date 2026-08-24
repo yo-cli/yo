@@ -6,6 +6,7 @@ use aws_config::{BehaviorVersion, Region, SdkConfig};
 use aws_sdk_s3::config::retry::RetryConfig;
 use aws_sdk_s3::config::timeout::TimeoutConfig;
 use aws_sdk_s3::config::RequestChecksumCalculation;
+use aws_smithy_types::error::display::DisplayErrorContext;
 use colored::Colorize;
 use std::time::Duration;
 
@@ -20,10 +21,16 @@ pub struct ClientOpts {
 }
 
 /// Load the shared AWS config (region from --region / env / profile / IMDS).
-pub async fn load_shared_config(region_override: Option<&str>) -> SdkConfig {
+pub async fn load_shared_config(
+    region_override: Option<&str>,
+    profile: Option<&str>,
+) -> SdkConfig {
     let mut loader = aws_config::defaults(BehaviorVersion::latest());
     if let Some(r) = region_override {
         loader = loader.region(Region::new(r.to_string()));
+    }
+    if let Some(p) = profile {
+        loader = loader.profile_name(p);
     }
     loader.load().await
 }
@@ -89,38 +96,37 @@ pub fn build_s3_client(
     Ok(aws_sdk_s3::Client::from_conf(builder.build()))
 }
 
-/// Print who we are (STS GetCallerIdentity). Credential problems surface here
-/// first, with plain-language pointers instead of a bare SDK error.
-pub async fn print_caller_identity(shared: &SdkConfig, lenient: bool) -> Result<()> {
-    let sts = aws_sdk_sts::Client::new(shared);
-    match sts.get_caller_identity().send().await {
-        Ok(id) => {
-            println!(
-                "{} 当前认证身份: {}  (账号 {})",
-                "✓".green(),
-                id.arn().unwrap_or("<unknown>").bold(),
-                id.account().unwrap_or("<unknown>")
-            );
-            Ok(())
-        }
-        Err(e) => {
-            let hint = format!(
-                "{} 获取 AWS 身份失败: {}\n  排查:\n  \
-                 1. EC2 上:实例是否挂了 IAM Role?(控制台 → EC2 → 实例 → 操作 → 安全 → 修改 IAM 角色)\n  \
-                 2. 本机:环境变量 AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY 或 ~/.aws/credentials 是否配置?\n  \
-                 3. 用 `aws sts get-caller-identity` 验证凭据链是否可用",
-                "✗".red(),
-                e
-            );
-            if lenient {
-                eprintln!("{}", hint.yellow());
-                eprintln!("  (--dry-run 模式,继续)");
-                Ok(())
-            } else {
-                bail!("{}", hint);
-            }
-        }
+pub struct CallerIdentity {
+    pub arn: String,
+    pub account: String,
+}
+
+/// Who are we? This is also the credential validator: it is the cheapest call
+/// that proves a credential set actually works, so `auth.rs` gates persistence
+/// on it (CLAUDE.md: 凭据先校验、后持久化).
+pub async fn caller_identity(shared: &SdkConfig) -> Result<CallerIdentity> {
+    match aws_sdk_sts::Client::new(shared).get_caller_identity().send().await {
+        Ok(id) => Ok(CallerIdentity {
+            arn: id.arn().unwrap_or("<unknown>").to_string(),
+            account: id.account().unwrap_or("<unknown>").to_string(),
+        }),
+        // DisplayErrorContext, not `{}`: the top frame of an SdkError is a
+        // useless label like "dispatch failure" — the sentence naming the
+        // actual cause ("no IAM role", DNS, timeout) is further down the
+        // source chain and is exactly what the user needs to see.
+        Err(e) => bail!("{}", DisplayErrorContext(&e)),
     }
+}
+
+/// The fallback message for when we cannot ask (unattended, or the user quit).
+pub fn credential_hint(err: &anyhow::Error) -> String {
+    format!(
+        "获取 AWS 身份失败: {}\n  排查:\n  \
+         1. EC2 上:实例是否挂了 IAM Role?(控制台 → EC2 → 实例 → 操作 → 安全 → 修改 IAM 角色)\n  \
+         2. 本机:环境变量 AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY 或 ~/.aws/credentials 是否配置?\n  \
+         3. 已有 profile 时加 --profile <名>;交互模式下会直接让你选或粘贴凭据",
+        err
+    )
 }
 
 /// Region actually resolved by the config chain (for the pricing table).

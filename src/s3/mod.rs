@@ -5,6 +5,7 @@
 // when the budget is reached. See specs/yo_s3.md.
 
 pub mod accel;
+pub mod auth;
 pub mod body;
 pub mod budget;
 pub mod checkpoint;

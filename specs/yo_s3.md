@@ -191,7 +191,7 @@ Rust SDK 的分包粒度和 Java v2 一致 —— 每个服务一个 crate，`aw
   - `--bucket <名>`：源桶名
 - 其余全部有缺省，无需出现在命令行：对象 1 TiB、part 256 MiB、内存池 2 GiB、并发 1 对象 × 4 part、速率区间 200–500 MiB/s、每 30s 重采样一次速率、region 取 EC2 实例元数据 / 默认 profile
 - 启动流程（每步 ✓/✗/⚠ 呈现）：
-  1. 解析 AWS 凭据链（EC2 IAM Role / 环境变量 / `~/.aws`），打印**当前认证身份**（`sts get-caller-identity`）
+  1. 解析 AWS 凭据链（EC2 IAM Role / 环境变量 / `~/.aws`），打印**当前认证身份**（`sts get-caller-identity`）；链上取不到凭据时**交互补齐**，见 §4.5
   2. 配置合法性校验（part ∈ [5 MiB, 5 GiB]、单对象 ≤ 10 000 part、≤ 5 TiB、池 ≥ 2×part）
   3. `HeadBucket` 连通性；**检测桶是否开启版本控制**（CRR 要求开，未开则在自动配置复制时帮开）
   4. **检测跨区复制是否已配置**：已配 → 显示目标桶 + 目标 region；未配 → 当场配好，见 §4.2
@@ -240,6 +240,7 @@ Rust SDK 的分包粒度和 Java v2 一致 —— 每个服务一个 crate，`aw
 ### 4.4 全局开关
 
 - `--mode`：选择烧钱模式（成本引擎），默认 `crr`，见 §3.1
+- `--profile`：用 `~/.aws` 里的哪个 profile；省略走标准凭据链，取不到时交互补齐，见 §4.5
 - `--dest-region`：跨区复制目标区域（逗号分隔）。桶未配复制时它既是配置输入、也是「授权自动建桶+建 IAM 角色」的意图信号，见 §4.2
 - `--transfer-acceleration`：上传走加速端点，每字节 +$0.04/GB，叠加在所选 mode 之上，见 §3.4
 - `--dry-run`：走完整流程（校验、成本预估、限速、切片）但**不实际发 PUT**，用于验证参数与预估
@@ -247,6 +248,32 @@ Rust SDK 的分包粒度和 Java v2 一致 —— 每个服务一个 crate，`aw
 - `--checkpoint` / `--summary-out`：省略时落在状态目录 `~/.yo/s3/<桶>-<哈希>/`，见 §5.7
 - `--yes`：跳过所有确认（无人值守）
 - `--endpoint-url` / `--path-style` / `--insecure-skip-tls-verify`：S3 兼容存储（MinIO/Ceph）支持（见 §7）
+
+---
+
+### 4.5 凭据交互补齐（`auth.rs`）
+
+**需求：** 凭据是跑起来的硬前提，也是第一次用最常见的拦路石。工具肯为 budget / bucket 停下来问，却对凭据甩三行提示让用户自己去别处解决 —— 这是自相矛盾的，把最难的一步反而留给了用户。
+
+**核心不是弹个菜单，是先探测环境再决定菜单上有什么。** 与 `netpath` 自动探 NAT、`resolve_acceleration` 自动降级同一套路：判断由工具做，不推给用户。
+
+| 选项 | 出现条件 | 工具能做什么 |
+|------|---------|-------------|
+| 粘贴 Access Key / Secret Key | 总是 | 立刻装上并校验 |
+| 用已有 profile | `~/.aws/{credentials,config}` 里解析出至少一个 | 列名字让用户选，`profile_name()` 重载 |
+| 去挂 IAM Role | IMDS 能取到 instance-id（确实在 EC2 上） | 打印**带实际实例 ID** 的操作步骤后退出。工具没有 IAM 权限，能做的只有精确指路 |
+| 退出 | 总是 | `--dry-run` 下降级继续，否则报错 |
+
+**关键约束：**
+
+- **`--yes` 绝不弹窗**，维持报错退出。nohup 的多天续跑停下来等输入，比失败更糟。
+- **先校验后持久化**：粘贴的密钥先过 `sts:GetCallerIdentity`，不通过就重问，**磁盘上不留任何东西**（CLAUDE.md 凭据原则）。
+- **缺区域不算凭据问题**。SDK 把它报成 `Missing Region` 配置错误；若当成凭据缺失处理，会把一个凭据完全正常的用户推去粘贴他不需要的密钥。单独分支只问区域。
+- `--profile <名>` 是该菜单的非交互等价物；`AWS_SHARED_CREDENTIALS_FILE` / `AWS_CONFIG_FILE` 与 SDK 保持一致，否则会「列的是这个文件、写的是另一个」。
+
+**落盘位置：`~/.aws/credentials` 的 `[yo-s3]` profile（权限 600），不是私有存储。** 它是 AWS 工具链的约定位置：写完 `aws` CLI 直接可用，用户能自己 vi 改删，不发明格式。写入按 section 精确替换，**不动任何其他 profile**，重复写不堆重复段（均有单测）。
+
+**刻意不复用仓库的 `crypto_utils`**：其密钥是 `SHA256(编译期常量 SALT)`（`crypto_utils.rs:15/39`），每台机器一致且可从二进制提取 —— 那是混淆不是加密。存 GitHub PAT 尚可，用它存 AWS 长期密钥还标注「已加密」是自欺。宁可明文写进那个所有人都知道该 chmod 600 的标准文件。
 
 ---
 
@@ -359,6 +386,10 @@ Rust SDK 的分包粒度和 Java v2 一致 —— 每个服务一个 crate，`aw
 | 拆除做成 `cleanup --all` 而非默认行为 | 删对象和删基础设施是两种不同性质的操作：前者可重来（下次接着烧），后者不可逆且要重配。默认只删数据，拆基础设施必须显式要 |
 | `setup` 给自建的桶打 `yo-s3-created` 标签 | 目标桶名从源桶名推导，撞上用户已有同名桶完全可能，而 `setup` 对已存在的桶是直接复用的。没有这个标签，拆除逻辑就分不清「我建的」和「我借用的」，删桶就成了会毁用户数据的操作 |
 | checkpoint 每对象写一次 + 原子 rename | 连跑数小时到数天，随时可续；原子写防写坏 |
+| 凭据取不到时交互补齐而非直接失败 | 工具已为 budget / bucket 交互补齐，凭据同样是必需项且更常拦路；只报错等于把最难的一步留给用户 |
+| 凭据菜单按环境算，不给固定列表 | 「挂 IAM Role」只在 EC2 上有意义，「选 profile」只在有 profile 时有意义；给一份要用户自己筛的清单，等于没降低心智负担 |
+| 凭据落 `~/.aws/credentials` 而非私有加密存储 | 那是 AWS 工具链的约定位置，写完 aws CLI 即可用、用户可自行增删；而仓库现有「加密」的密钥是编译期常量派生，用于 AWS 长期密钥属自欺 |
+| 缺 region 与缺凭据分开处理 | SDK 把缺 region 报成配置错误；混为一谈会让凭据正常的用户去粘贴不需要的密钥 |
 | 状态目录身份用 (endpoint, bucket, prefix) 而非 cwd | 账本身份必须等于「这笔预算打在哪」；绑 cwd 时从两个目录起同一个桶就是两本账、同一笔预算烧两遍 |
 | 单实例护栏用 flock 而非 PID 文件 | 内核在持有者死亡（含 kill -9）时自动释放，没有陈旧锁要判、没有存活探测会判错；代价只是 nix 加一个已有依赖的 feature |
 | 加锁点在所有 AWS 调用之前 | 第二个实例必须在能改桶加速配置、能建复制目标桶之前就被拒，而不是走完预检才发现 |
@@ -383,6 +414,7 @@ src/s3/
   mod.rs                         # 模块声明 + S3 硬限制常量 + 格式化工具
   config.rs                      # BenchConfig：校验 + config 快照 + 单位解析（含单元测试）
   client.rs                      # S3/STS client 构建：endpoint/path-style/checksum/重试关闭
+  auth.rs                        # 凭据交互补齐：环境探测、profile 选择、校验后写 ~/.aws（含单元测试）
   pool.rs                        # BufferPool：并行填充、环形取段、64B 唯一头（含单元测试）
   body.rs                        # ChunkedBody：Vec<Bytes> → 可重放 SdkBody（含单元测试）
   limiter.rs                     # 令牌桶 + 速率采样器（含长期均值单元测试）

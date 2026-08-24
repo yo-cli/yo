@@ -9,10 +9,10 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use super::args::RunArgs;
+use crate::s3::auth;
 use crate::s3::checkpoint::Checkpoint;
 use crate::s3::client::{
-    build_s3_client, discover_bucket_region, load_shared_config, print_caller_identity,
-    resolved_region, ClientOpts,
+    build_s3_client, discover_bucket_region, load_shared_config, resolved_region, ClientOpts,
 };
 use crate::s3::config::{self, AccelMode, BenchConfig};
 use crate::s3::cost::{
@@ -139,8 +139,21 @@ pub async fn prepare(args: RunArgs) -> Result<RunContext> {
     );
 
     // --- 2. credentials + clients ---
-    let shared = load_shared_config(cfg.region.as_deref()).await;
-    print_caller_identity(&shared, cfg.dry_run).await?;
+    // Credentials are as required as --budget and --bucket, and are the most
+    // common thing to block a first run, so they get the same interactive
+    // fill-in rather than a hint telling the user to go solve it elsewhere.
+    let mut shared = load_shared_config(cfg.region.as_deref(), args.profile.as_deref()).await;
+    auth::ensure_credentials(
+        &mut shared,
+        &auth::AuthOpts {
+            region: cfg.region.as_deref(),
+            profile: args.profile.as_deref(),
+            yes: cfg.yes,
+            lenient: cfg.dry_run,
+        },
+    )
+    .await?;
+    let shared = shared;
     // The plain client drives every control-plane call (discovery, replication
     // config, sweeps, backlog sampling). The accelerated upload client is built
     // at the end, once acceleration is resolved — the accelerate endpoint is an

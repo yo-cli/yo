@@ -38,6 +38,11 @@ pub struct RunArgs {
     #[arg(long)]
     pub region: Option<String>,
 
+    /// 用 ~/.aws 里的哪个 profile。省略时走标准凭据链;链上没有可用凭据时
+    /// 交互模式会直接让你选 profile 或粘贴 Access Key
+    #[arg(long)]
+    pub profile: Option<String>,
+
     /// 单对象大小
     #[arg(long, value_parser = parse_size, default_value = "1TiB")]
     pub object_size: u64,
@@ -155,6 +160,10 @@ pub struct CleanupArgs {
     /// AWS 区域(默认自动解析)
     #[arg(long)]
     pub region: Option<String>,
+
+    /// 用 ~/.aws 里的哪个 profile
+    #[arg(long)]
+    pub profile: Option<String>,
 
     /// S3 兼容存储的自定义端点
     #[arg(long)]

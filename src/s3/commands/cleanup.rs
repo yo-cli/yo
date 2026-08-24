@@ -6,8 +6,9 @@ use anyhow::{bail, Result};
 use colored::Colorize;
 
 use super::args::CleanupArgs;
+use crate::s3::auth;
 use crate::s3::client::{
-    build_s3_client, discover_bucket_region, load_shared_config, print_caller_identity, ClientOpts,
+    build_s3_client, discover_bucket_region, load_shared_config, ClientOpts,
 };
 use crate::s3::config;
 use crate::s3::lock::{self, Acquired, RunLock};
@@ -50,8 +51,18 @@ pub async fn run(args: CleanupArgs) -> Result<()> {
         ),
     };
 
-    let shared = load_shared_config(args.region.as_deref()).await;
-    print_caller_identity(&shared, false).await?;
+    let mut shared = load_shared_config(args.region.as_deref(), args.profile.as_deref()).await;
+    auth::ensure_credentials(
+        &mut shared,
+        &auth::AuthOpts {
+            region: args.region.as_deref(),
+            profile: args.profile.as_deref(),
+            yes: args.yes,
+            lenient: false,
+        },
+    )
+    .await?;
+    let shared = shared;
     let opts = ClientOpts {
         endpoint_url: args.endpoint_url.clone(),
         path_style: args.path_style,
