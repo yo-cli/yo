@@ -19,6 +19,7 @@ use crate::s3::config::{self, AccelMode, BenchConfig};
 use crate::s3::cost::{
     self, path_surcharges, pricing_for, print_estimate, write_lifecycle_files, CostModel, Pricing,
 };
+use crate::s3::lastrun::{self, LastRun};
 use crate::s3::lock::{self, Acquired, RunLock};
 use crate::s3::modes::{BurnMode, ModeCtx};
 use crate::s3::{accel, crr, fmt_bytes, fmt_usd, netpath};
@@ -48,13 +49,22 @@ pub struct RunContext {
 }
 
 pub async fn prepare(args: RunArgs) -> Result<RunContext> {
+    // --- 0. last run's answers, for the params that have no default ---
+    // Unattended runs deliberately ignore it: a cron job must be reproducible
+    // from its command line alone, never from local state that drifted.
+    let last = if args.yes { LastRun::default() } else { lastrun::load() };
+
     // --- 1. fill in the two required params, interactively when missing ---
     let budget_micro = match args.budget {
         Some(b) => b,
         None if args.yes => bail!("--yes 模式下必须显式提供 --budget"),
         None => {
+            let default_usd = last
+                .budget_micro
+                .map(|m| m as f64 / 1_000_000.0)
+                .unwrap_or(500.0);
             let usd = inquire::CustomType::<f64>::new("要烧掉多少预算(美元)?")
-                .with_default(500.0)
+                .with_default(default_usd)
                 .with_help_message("这是硬上限,烧够即停")
                 .prompt()?;
             if usd <= 0.0 {
@@ -66,12 +76,71 @@ pub async fn prepare(args: RunArgs) -> Result<RunContext> {
     let bucket = match args.bucket.clone() {
         Some(b) => b,
         None if args.yes => bail!("--yes 模式下必须显式提供 --bucket"),
-        None => inquire::Text::new("目标 S3 桶名称?").prompt()?,
+        None => {
+            let mut prompt = inquire::Text::new("目标 S3 桶名称?");
+            if let Some(b) = last.bucket.as_deref() {
+                prompt = prompt.with_default(b);
+            }
+            prompt.prompt()?
+        }
     };
+
+    // Params with no documented default fall back to last time. Explicit flags
+    // always win, and whatever gets recalled is printed — recalled state that
+    // nobody can see is worse than retyping the flag.
+    let mut reused: Vec<&str> = Vec::new();
+    let mut recall_str = |name: &'static str, empty: bool| {
+        if empty {
+            reused.push(name);
+        }
+    };
+    recall_str("region", args.region.is_none() && last.region.is_some());
+    recall_str("profile", args.profile.is_none() && last.profile.is_some());
+    recall_str(
+        "endpoint-url",
+        args.endpoint_url.is_none() && last.endpoint_url.is_some(),
+    );
+    recall_str(
+        "dest-region",
+        args.dest_regions.is_empty() && !last.dest_regions.is_empty(),
+    );
+    recall_str("duration", args.duration.is_none() && last.duration().is_some());
+    recall_str(
+        "max-duration",
+        args.max_duration.is_none() && last.max_duration().is_some(),
+    );
+    recall_str("total-size", args.total_size.is_none() && last.total_size.is_some());
+    recall_str("iterations", args.iterations.is_none() && last.iterations.is_some());
+
+    let region = args.region.clone().or_else(|| last.region.clone());
+    let profile = args.profile.clone().or_else(|| last.profile.clone());
+    let endpoint_url = args.endpoint_url.clone().or_else(|| last.endpoint_url.clone());
+    let dest_regions = if args.dest_regions.is_empty() {
+        last.dest_regions.clone()
+    } else {
+        args.dest_regions.clone()
+    };
+    let duration = args.duration.or_else(|| last.duration());
+    let total_size = args.total_size.or(last.total_size);
+    let iterations = args.iterations.or(last.iterations);
+    let max_duration = args.max_duration.or_else(|| last.max_duration());
+
+    if !reused.is_empty() {
+        let flags = last.describe_reused(&reused);
+        if !flags.is_empty() {
+            println!("{} 沿用上次参数: {}", "ℹ".blue(), flags.bold());
+            if let Ok(p) = lastrun::path() {
+                println!(
+                    "  {}",
+                    format!("显式传参可覆盖;不想要就 rm {}", p.display()).dimmed()
+                );
+            }
+        }
+    }
 
     // --- 1.5 state directory: checkpoint + summary + the lock all live here ---
     let state = config::state_dir(
-        args.endpoint_url.as_deref(),
+        endpoint_url.as_deref(),
         &bucket,
         &args.key_prefix,
         args.dry_run,
@@ -81,10 +150,10 @@ pub async fn prepare(args: RunArgs) -> Result<RunContext> {
         mode: args.mode,
         bucket,
         key_prefix: args.key_prefix.clone(),
-        dest_regions: args.dest_regions.clone(),
+        dest_regions: dest_regions.clone(),
         budget_micro,
-        region: args.region.clone(),
-        endpoint_url: args.endpoint_url.clone(),
+        region: region.clone(),
+        endpoint_url: endpoint_url.clone(),
         path_style: args.path_style,
         insecure_skip_tls_verify: args.insecure_skip_tls_verify,
         // Resolved below, once the bucket's region is known.
@@ -99,10 +168,10 @@ pub async fn prepare(args: RunArgs) -> Result<RunContext> {
         rate_mode: args.rate_mode,
         rate_resample_interval: args.rate_resample_interval,
         retain: args.retain,
-        total_size: args.total_size,
-        iterations: args.iterations,
+        total_size,
+        iterations,
         stop_when: args.stop_when,
-        max_duration: args.max_duration,
+        max_duration,
         checkpoint_path: resolve_checkpoint(
             args.checkpoint.as_deref(),
             args.resume.as_deref(),
@@ -143,12 +212,12 @@ pub async fn prepare(args: RunArgs) -> Result<RunContext> {
     // Credentials are as required as --budget and --bucket, and are the most
     // common thing to block a first run, so they get the same interactive
     // fill-in rather than a hint telling the user to go solve it elsewhere.
-    let mut shared = load_shared_config(cfg.region.as_deref(), args.profile.as_deref()).await;
+    let mut shared = load_shared_config(cfg.region.as_deref(), profile.as_deref()).await;
     auth::ensure_credentials(
         &mut shared,
         &auth::AuthOpts {
             region: cfg.region.as_deref(),
-            profile: args.profile.as_deref(),
+            profile: profile.as_deref(),
             yes: cfg.yes,
             lenient: cfg.dry_run,
         },
@@ -295,7 +364,7 @@ pub async fn prepare(args: RunArgs) -> Result<RunContext> {
     // --- 6.5 --duration: turn a target wall time into a rate ---
     // Done here and not at config time because the byte count depends on the
     // composed cost model, which only exists once the mode is armed.
-    if let Some(target) = args.duration {
+    if let Some(target) = duration {
         let total_bytes = if cost.budget_drives_stop() {
             cost::budget_bytes(cfg.budget_micro, &cost, &pricing, cfg.part_size)
         } else {
@@ -401,7 +470,9 @@ pub async fn prepare(args: RunArgs) -> Result<RunContext> {
         s3.clone()
     };
 
-    Ok(RunContext {
+    let remember_bucket = cfg.bucket.clone();
+    let remember_budget = cfg.budget_micro;
+    let ctx = RunContext {
         cfg,
         s3,
         upload_s3,
@@ -412,7 +483,23 @@ pub async fn prepare(args: RunArgs) -> Result<RunContext> {
         resumed,
         run_id,
         lock: run_lock,
-    })
+    };
+
+    // Recorded only after the confirmation gate: a cancelled run must not
+    // rewrite what "last time" means.
+    lastrun::save(&LastRun {
+        bucket: Some(remember_bucket),
+        budget_micro: Some(remember_budget),
+        duration_secs: duration.map(|d| d.as_secs()),
+        region: region.clone(),
+        profile: profile.clone(),
+        dest_regions: dest_regions.clone(),
+        endpoint_url: endpoint_url.clone(),
+        total_size,
+        iterations,
+        max_duration_secs: max_duration.map(|d| d.as_secs()),
+    });
+    Ok(ctx)
 }
 
 fn path_string(path: PathBuf) -> String {

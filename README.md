@@ -56,6 +56,26 @@ yo-s3 --budget 500 --bucket my-burn-bucket --dest-region us-west-2,eu-west-1 --y
 
 中断后续跑:直接重跑同一条命令,发现 checkpoint 会询问(或 `--yes` 自动)继续。
 
+### 记住上次的参数
+
+裸跑 `yo-s3` 时,**没有默认值的那些参数**会沿用上次:
+
+```
+? 要烧掉多少预算(美元)? (500)      ← 回车即上次的值
+? 目标 S3 桶名称? (my-burn-bucket) ← 回车即上次的值
+ℹ 沿用上次参数: --profile yo-s3 --dest-region us-west-2,eu-west-1 --duration 1day
+  显式传参可覆盖;不想要就 rm ~/.yo/s3/last-run.json
+```
+
+规则很窄,不会给你惊喜:
+
+- **只记没有默认值的参数**(`--bucket` `--budget` `--duration` `--profile` `--region` `--dest-region` `--endpoint-url` `--total-size` `--iterations` `--max-duration`)。`--object-size` 这类 `--help` 里写着 `[default: ...]` 的**永远用文档里那个值** —— 否则 help 说一套、实际是文件里的隐藏状态,比多敲一次参数更糟
+- **显式传参永远赢**,并且成为新的记忆
+- **沿用了什么一定打印出来**,连同清除命令。看不见的记忆比没有记忆更坏
+- **`--yes` 完全不读记忆**:无人值守的运行必须能只靠命令行复现,不能依赖本机漂移的状态。写还是会写
+- 只在**确认门通过之后**才记录 —— 你按了 n 取消的那次不会改写「上次」
+- 从不记 `--yes` / `--dry-run` / `--force` 这类开关,也不记 `--resume` / `--checkpoint` 这种一次性路径
+
 ### 对象大小决定续跑粒度和进度可见度
 
 `--object-size` 默认 **100 GiB**,它不只是「一次写多大」:
