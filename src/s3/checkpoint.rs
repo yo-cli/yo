@@ -99,7 +99,6 @@ impl Checkpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::s3::config::RateMode;
     use crate::s3::modes::ModeId;
     use crate::s3::MIB;
 
@@ -116,9 +115,6 @@ mod tests {
             object_name: "db-backup".into(),
             object_ext: "tar.gz".into(),
             part_size: 10 * MIB,
-            rate_min: MIB,
-            rate_max: 2 * MIB,
-            rate_mode: RateMode::Continuous,
             retain_secs: 86400,
         }
     }
@@ -166,6 +162,59 @@ mod tests {
         other.part_size = 20 * MIB;
         let err = ckpt.validate_config(&other).unwrap_err().to_string();
         assert!(err.contains("part_size"), "{}", err);
+    }
+
+    /// Pace is NOT part of the snapshot: a run that turns out to be outrunning
+    /// the network must be slowable without throwing away the budget already
+    /// burned. Nothing in the ledger depends on rate — burned_micro is bytes ×
+    /// price — so allowing it costs no accuracy.
+    #[test]
+    fn changing_the_pace_does_not_block_resume() {
+        let ckpt = Checkpoint::new("run-1".into(), snapshot());
+        let same = snapshot();
+        ckpt.validate_config(&same).unwrap();
+        // A checkpoint written by an older build still carries rate_* keys in
+        // its JSON; serde ignores them, so the resume must still succeed.
+        let legacy = serde_json::json!({
+            "version": 1,
+            "run_id": "run-1",
+            "config": {
+                "mode": "crr", "transfer_acceleration": false,
+                "bucket": "b", "key_prefix": "p/", "budget_micro": 1000000,
+                "endpoint_url": null,
+                "object_size_min": 104857600, "object_size_max": 104857600,
+                "object_name": "db-backup", "object_ext": "tar.gz",
+                "part_size": 10485760,
+                "rate_min": 209715200, "rate_max": 524288000, "rate_mode": "continuous",
+                "retain_secs": 86400
+            },
+            "completed_iterations": 3, "completed_bytes": 1, "burned_micro": 42,
+            "started_at": "2026-08-25T00:00:00Z",
+            "active_secs": 1, "slowdown_total": 0, "error_total": 0
+        });
+        let old: Checkpoint = serde_json::from_value(legacy).unwrap();
+        assert_eq!(old.burned_micro, 42, "已烧金额必须保住");
+        old.validate_config(&snapshot()).unwrap();
+    }
+
+    /// What the snapshot still exists for: layout and accounting identity.
+    #[test]
+    fn layout_and_accounting_changes_still_block_resume() {
+        let ckpt = Checkpoint::new("run-1".into(), snapshot());
+        for (name, mutate) in [
+            ("bucket", (|s: &mut ConfigSnapshot| s.bucket = "other".into()) as fn(&mut ConfigSnapshot)),
+            ("budget", |s: &mut ConfigSnapshot| s.budget_micro = 1),
+            ("object_name", |s: &mut ConfigSnapshot| s.object_name = "x".into()),
+            ("key_prefix", |s: &mut ConfigSnapshot| s.key_prefix = "z/".into()),
+        ] {
+            let mut other = snapshot();
+            mutate(&mut other);
+            assert!(
+                ckpt.validate_config(&other).is_err(),
+                "{} 变了却允许续跑",
+                name
+            );
+        }
     }
 
     #[test]

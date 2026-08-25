@@ -202,9 +202,6 @@ impl BenchConfig {
             object_name: self.object_name.clone(),
             object_ext: self.object_ext.clone(),
             part_size: self.part_size,
-            rate_min: self.rate_min,
-            rate_max: self.rate_max,
-            rate_mode: self.rate_mode,
             retain_secs: self.retain.as_secs(),
         }
     }
@@ -234,9 +231,12 @@ pub struct ConfigSnapshot {
     pub object_name: String,
     pub object_ext: String,
     pub part_size: u64,
-    pub rate_min: u64,
-    pub rate_max: u64,
-    pub rate_mode: RateMode,
+    // Rate is deliberately ABSENT. It is not "where data goes, how it is laid
+    // out, or what done means": burned_micro is bytes × price and the pace
+    // never enters it. Guarding it here only blocked the one adjustment a
+    // long run actually needs — slowing down when the network cannot keep up —
+    // and forced the user to choose between an unusable pace and throwing the
+    // already-burned budget away.
     pub retain_secs: u64,
 }
 
@@ -280,9 +280,6 @@ impl ConfigSnapshot {
         cmp("object_name", self.object_name.clone(), other.object_name.clone());
         cmp("object_ext", self.object_ext.clone(), other.object_ext.clone());
         cmp("part_size", fmt_bytes(self.part_size), fmt_bytes(other.part_size));
-        cmp("rate_min", super::fmt_rate(self.rate_min), super::fmt_rate(other.rate_min));
-        cmp("rate_max", super::fmt_rate(self.rate_max), super::fmt_rate(other.rate_max));
-        cmp("rate_mode", format!("{:?}", self.rate_mode), format!("{:?}", other.rate_mode));
         cmp(
             "retain",
             format!("{}s", self.retain_secs),
