@@ -214,6 +214,41 @@ pub fn budget_bytes(budget_micro: u64, cost: &CostModel, pricing: &Pricing, part
     (budget_micro as f64 / per_byte) as u64
 }
 
+/// Immediate cost of one whole object of `bytes`: its transfer fee plus every
+/// request it takes (one per part started, plus the mode's per-object extras).
+///
+/// The near-inverse of `budget_bytes`, and deliberately next to it: the two
+/// differ by the per-object requests, so a caller that asks "does this budget
+/// buy an object" with one and enforces it with the other draws the line in two
+/// different places. `--days`' anti-hang guard did exactly that.
+pub fn object_cost_micro(bytes: u64, cost: &CostModel, pricing: &Pricing, part_size: u64) -> u64 {
+    let parts = bytes.div_ceil(part_size);
+    cost.transfer_micro(bytes) + pricing.request_micro(parts + cost.requests_per_object)
+}
+
+/// The `--days` ceilings on the estimate page. Printed right under the budget
+/// because they are hard ceilings, not pacing hints: the run stands down when
+/// one lands, whatever else it could still afford.
+fn print_daily_cap(cfg: &BenchConfig) {
+    let (Some(cap), Some(days)) = (cfg.daily_cap_micro(), cfg.days) else {
+        return;
+    };
+    println!(
+        "  每天上限(硬上限):    {}  × {} 天  (UTC 日历日;烧满休眠到次日零点)",
+        fmt_usd(cap).green().bold(),
+        days
+    );
+    // The hour is where the burn is actually shaped; the day is what it adds
+    // up to. Showing both stops the hourly line from reading like a surprise.
+    let (lo, hi) = super::quota::hour_band(cap / 24);
+    println!(
+        "  每小时约:             {}  (每个整点在 {} – {} 间重取,烧满休眠到下个整点)",
+        fmt_usd(cap / 24).bold(),
+        fmt_usd(lo),
+        fmt_usd(hi)
+    );
+}
+
 /// breakdown, expected duration, and the traps worth knowing before burning.
 /// `cost` is the composed model (mode engine + upload-path surcharges), not
 /// `mode.cost_model()` — the mode does not know what the path adds.
@@ -245,6 +280,7 @@ pub fn print_estimate(cfg: &BenchConfig, pricing: &Pricing, mode: &dyn BurnMode,
             pricing.storage_micro_for(window_bytes * copies, retain_hours.max(secs / 3600.0));
 
         println!("  预算(硬上限):        {}", fmt_usd(budget).green().bold());
+        print_daily_cap(cfg);
         if cost.transfer.len() > 1 {
             println!(
                 "  ├ 每字节合计:         ${:.4}/GB  ({} 项叠加)",

@@ -83,6 +83,17 @@ pub struct RunArgs {
     #[arg(long, value_parser = parse_duration, conflicts_with_all = ["rate_min", "rate_max"])]
     pub duration: Option<Duration>,
 
+    /// 把预算摊到 N 天,再摊到每小时:每个整点按「预算 ÷ N ÷ 24」的 ±10% 重取
+    /// 本小时额度并据此配速,烧满就休眠到下个整点;每个 UTC 日历日另有一道
+    /// **硬上限** 预算 ÷ N 兜底。账本记在 checkpoint 里,重启照样算数。
+    /// 与 --duration / --rate-min / --rate-max 互斥
+    #[arg(
+        long,
+        value_parser = clap::value_parser!(u64).range(1..),
+        conflicts_with_all = ["duration", "rate_min", "rate_max"]
+    )]
+    pub days: Option<u64>,
+
     /// 速率下限(如 200MiB 或 200MiB/s)
     #[arg(long, value_parser = parse_rate, default_value = "200MiB")]
     pub rate_min: u64,

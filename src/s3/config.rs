@@ -89,6 +89,9 @@ pub struct BenchConfig {
     pub iterations: Option<u64>,
     pub stop_when: StopWhen,
     pub max_duration: Option<Duration>,
+    /// `--days`: spread the budget over this many days and cap what any one
+    /// UTC day may burn at `budget ÷ days`. None = no daily ceiling.
+    pub days: Option<u64>,
 
     pub checkpoint_path: String,
     pub summary_out: String,
@@ -171,7 +174,16 @@ impl BenchConfig {
         if !self.key_prefix.is_empty() && !self.key_prefix.ends_with('/') {
             bail!("--key-prefix 必须以 / 结尾(当前: {})", self.key_prefix);
         }
+        if let Some(days) = self.days {
+            split_over_days(self.budget_micro, days)?;
+        }
         Ok(())
+    }
+
+    /// The hard per-UTC-day ceiling `--days` implies, or `None` without it.
+    /// `validate` has already rejected a split too thin to buy anything.
+    pub fn daily_cap_micro(&self) -> Option<u64> {
+        self.days.map(|days| self.budget_micro / days.max(1))
     }
 
     /// A random size for the next object. Real backup jobs do not emit
@@ -196,6 +208,7 @@ impl BenchConfig {
             bucket: self.bucket.clone(),
             key_prefix: self.key_prefix.clone(),
             budget_micro: self.budget_micro,
+            daily_cap_micro: self.daily_cap_micro().unwrap_or(0),
             endpoint_url: self.endpoint_url.clone(),
             object_size_min: self.object_size_min,
             object_size_max: self.object_size_max,
@@ -229,6 +242,12 @@ pub struct ConfigSnapshot {
     pub bucket: String,
     pub key_prefix: String,
     pub budget_micro: u64,
+    /// The `--days` ceiling in force, 0 = none. Recorded so that a resume which
+    /// silently drops `--days` says so: the ledger it guards lives in the same
+    /// checkpoint, and a hard cap that disappears without a word is the worst
+    /// kind of change for a tool that spends real money.
+    #[serde(default)]
+    pub daily_cap_micro: u64,
     pub endpoint_url: Option<String>,
     /// Absent in checkpoints written before object size became a range and
     /// before objects were named — zero / empty means "not recorded", which
@@ -301,6 +320,11 @@ impl ConfigSnapshot {
             super::fmt_usd(self.budget_micro),
             super::fmt_usd(other.budget_micro),
         );
+        cmp(
+            "daily_cap",
+            fmt_daily_cap(self.daily_cap_micro),
+            fmt_daily_cap(other.daily_cap_micro),
+        );
         // Zero / empty means the checkpoint predates the field, not that the
         // value was zero — reporting "checkpoint=0 B 当前=1.00 GiB" would read
         // like a defect rather than like an older file.
@@ -335,10 +359,49 @@ impl ConfigSnapshot {
     }
 }
 
-/// Jitter half-width around the paced average. The mean of a uniform draw over
-/// `[0.6R, 1.4R]` is exactly R, so the planned duration still lands on target
-/// while the rate keeps the wobble that is part of how this tool writes.
-const PACE_JITTER: f64 = 0.4;
+/// The hard per-UTC-day ceiling `budget ÷ days`. The division is the whole
+/// definition of `--days`, and it lives here alone so the prompt that offers
+/// the split and the validation that accepts it can never disagree about which
+/// splits are usable — or word the refusal two different ways.
+pub fn split_over_days(budget_micro: u64, days: u64) -> Result<u64> {
+    if days == 0 {
+        bail!("--days 必须 ≥ 1");
+    }
+    let per_day = budget_micro / days;
+    if per_day == 0 {
+        bail!(
+            "预算 {} 摊到 {} 天,每天不足 $0.000001 —— 天数太多或预算太小",
+            super::fmt_usd(budget_micro),
+            days
+        );
+    }
+    Ok(per_day)
+}
+
+/// "无" rather than "$0.00": a run without `--days` has no daily ceiling at
+/// all, which is a different thing from one whose ceiling rounds to nothing.
+fn fmt_daily_cap(micro: u64) -> String {
+    if micro == 0 {
+        "无".to_string()
+    } else {
+        super::fmt_usd(micro)
+    }
+}
+
+/// Jitter half-width around a planned average. The mean of a uniform draw over
+/// `[0.6x, 1.4x]` is exactly x, so the plan still lands on target while keeping
+/// the wobble that is part of how this tool writes. One shape for both places
+/// that wobble: the rate, and the hourly ceiling `--days` draws (see s3::quota).
+pub const PACE_JITTER: f64 = 0.4;
+
+/// The `[min, max]` a planned average is sampled from.
+pub fn jitter_bounds(avg: u64) -> (u64, u64) {
+    let avg = avg as f64;
+    (
+        (avg * (1.0 - PACE_JITTER)) as u64,
+        (avg * (1.0 + PACE_JITTER)) as u64,
+    )
+}
 
 /// Highest paced rate worth believing on one instance (10 Gbps). Above this the
 /// plan is network-bound rather than budget-bound, so the run just takes longer
@@ -356,9 +419,7 @@ pub fn pace_rate(total_bytes: u64, duration: Duration) -> Result<(u64, u64)> {
     if secs <= 0.0 {
         bail!("--duration 必须 > 0");
     }
-    let avg = total_bytes as f64 / secs;
-    let min = (avg * (1.0 - PACE_JITTER)) as u64;
-    let max = (avg * (1.0 + PACE_JITTER)) as u64;
+    let (min, max) = jitter_bounds((total_bytes as f64 / secs) as u64);
     if min == 0 {
         bail!(
             "--duration {} 太长:摊下来平均速率不足 1 B/s(总写入量 {})",
@@ -506,6 +567,7 @@ mod tests {
             iterations: None,
             stop_when: StopWhen::All,
             max_duration: None,
+            days: None,
             checkpoint_path: "ckpt.json".into(),
             summary_out: "summary.json".into(),
             report_interval: Duration::from_secs(10),
@@ -709,6 +771,41 @@ mod tests {
         let root = dirs_next::home_dir().unwrap().join(".yo").join("s3");
         assert_eq!(dir.parent().unwrap(), root);
         assert!(!dir.file_name().unwrap().to_string_lossy().contains('/'));
+    }
+
+    /// `--days` is just the budget divided by the days — the estimate page, the
+    /// checkpoint ledger and the planner all read this one number.
+    #[test]
+    fn the_daily_ceiling_is_the_budget_divided_by_the_days() {
+        let mut c = base(); // $500
+        assert_eq!(c.daily_cap_micro(), None);
+        c.days = Some(30);
+        c.validate().unwrap();
+        assert_eq!(c.daily_cap_micro(), Some(500_000_000 / 30));
+    }
+
+    /// Spreading a budget so thin that a day buys nothing is a typo, not a plan.
+    #[test]
+    fn a_budget_too_thin_to_split_is_refused_with_the_arithmetic() {
+        let mut c = base();
+        c.budget_micro = 100; // $0.0001
+        c.days = Some(365);
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("365"), "{}", err);
+    }
+
+    /// A resume that quietly drops `--days` must not take the ceiling with it
+    /// in silence — it is a note, not a blocker, because the money already
+    /// burned stays valid either way.
+    #[test]
+    fn dropping_the_daily_ceiling_is_reported_not_refused() {
+        let mut with_cap = base();
+        with_cap.days = Some(30);
+        let d = with_cap.snapshot().diff(&base().snapshot());
+        assert!(d.blocking.is_empty(), "不该拦: {:?}", d.blocking);
+        assert_eq!(d.notes.len(), 1, "{:?}", d.notes);
+        assert!(d.notes[0].contains("daily_cap"), "{:?}", d.notes);
+        assert!(d.notes[0].contains("无"), "取消日上限要说清楚: {:?}", d.notes);
     }
 
     #[test]

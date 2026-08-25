@@ -102,6 +102,10 @@ pub struct RunSummary {
     pub stop_reason: String,
 
     pub budget_usd: f64,
+    /// The `--days` ceiling this run was planned against, if any. A multi-day
+    /// plan's summary has to say what one day was allowed to cost, or the file
+    /// cannot be checked against the daily AWS bill it was sized for.
+    pub daily_cap_usd: Option<f64>,
     pub burned_usd: f64,
     pub burned_transfer_usd: f64,
     pub burned_request_usd: f64,

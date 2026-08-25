@@ -6,10 +6,12 @@ use anyhow::{bail, Context, Result};
 use colored::Colorize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use uuid::Uuid;
 
 use super::args::RunArgs;
 use crate::s3::auth;
+use crate::s3::budget;
 use crate::s3::checkpoint::Checkpoint;
 use crate::s3::client::{
     build_s3_client, discover_bucket_region, load_shared_config, resolved_region, BucketProbe,
@@ -22,6 +24,7 @@ use crate::s3::cost::{
 use crate::s3::lastrun::{self, LastRun};
 use crate::s3::lock::{self, Acquired, RunLock};
 use crate::s3::modes::{BurnMode, ModeCtx};
+use crate::s3::quota;
 use crate::s3::{accel, crr, fmt_bytes, fmt_usd, netpath, sweep};
 
 /// Where a pre-`~/.yo/s3` version of the tool kept its checkpoint.
@@ -54,7 +57,9 @@ pub async fn prepare(args: RunArgs) -> Result<RunContext> {
     // from its command line alone, never from local state that drifted.
     let last = if args.yes { LastRun::default() } else { lastrun::load() };
 
-    // --- 1. fill in the two required params, interactively when missing ---
+    // --- 1. fill in the required params, interactively when missing ---
+    // Budget then days then bucket: the first two are one decision (how much,
+    // and how fast), the third is where.
     let budget_micro = match args.budget {
         Some(b) => b,
         None if args.yes => bail!("--yes 模式下必须显式提供 --budget"),
@@ -72,6 +77,16 @@ pub async fn prepare(args: RunArgs) -> Result<RunContext> {
             }
             (usd * 1_000_000.0).round() as u64
         }
+    };
+    // How many days to spread it over. Asked right after the budget because it
+    // is the other half of the same decision — and because the answer is what
+    // decides whether this run finishes tonight or a month from now.
+    // `--duration` says the same thing in other units, so naming it skips the
+    // question; `--yes` never asks, like every other prompt here.
+    let days = match args.days {
+        Some(d) => Some(d),
+        None if args.duration.is_some() || args.yes => None,
+        None => prompt_days(budget_micro, last.days)?,
     };
     let bucket = match args.bucket.clone() {
         Some(b) => b,
@@ -104,7 +119,17 @@ pub async fn prepare(args: RunArgs) -> Result<RunContext> {
         "dest-region",
         args.dest_regions.is_empty() && !last.dest_regions.is_empty(),
     );
-    recall_str("duration", args.duration.is_none() && last.duration().is_some());
+    // `--duration` and `--days` plan the pace out of the budget in different
+    // units, so an answered or explicit `--days` has to shut `--duration`'s
+    // memory off. clap only rejects the pair when BOTH are typed — a remembered
+    // `--duration 6h` would otherwise override the number just typed at the
+    // prompt, and the daily ceiling would silently apply at the wrong pace.
+    let duration = if days.is_some() || args.duration.is_some() {
+        args.duration
+    } else {
+        last.duration()
+    };
+    recall_str("duration", args.duration.is_none() && duration.is_some());
     recall_str(
         "max-duration",
         args.max_duration.is_none() && last.max_duration().is_some(),
@@ -120,7 +145,6 @@ pub async fn prepare(args: RunArgs) -> Result<RunContext> {
     } else {
         args.dest_regions.clone()
     };
-    let duration = args.duration.or_else(|| last.duration());
     let total_size = args.total_size.or(last.total_size);
     let iterations = args.iterations.or(last.iterations);
     let max_duration = args.max_duration.or_else(|| last.max_duration());
@@ -175,6 +199,7 @@ pub async fn prepare(args: RunArgs) -> Result<RunContext> {
         iterations,
         stop_when: args.stop_when,
         max_duration,
+        days,
         checkpoint_path: resolve_checkpoint(
             args.checkpoint.as_deref(),
             args.resume.as_deref(),
@@ -400,28 +425,45 @@ pub async fn prepare(args: RunArgs) -> Result<RunContext> {
         );
     }
 
-    // --- 6.5 --duration: turn a target wall time into a rate ---
+    // --- 6.5 --duration / --days: turn a target wall time into a rate ---
     // Done here and not at config time because the byte count depends on the
     // composed cost model, which only exists once the mode is armed.
-    if let Some(target) = duration {
+    // `--days` plans the same way `--duration` does; what it adds on top is the
+    // hard per-day ceiling, which lives in the budget meter (see §5.6e).
+    // Carrying the flag text alongside the target keeps the two from being
+    // re-derived apart: whichever flag set the wall time is the one every
+    // message about it should name.
+    let paced = match (duration, days) {
+        (Some(target), _) => Some((target, format!("--duration {}", humantime::format_duration(target)))),
+        (None, Some(n)) => Some((
+            Duration::from_secs(n.saturating_mul(quota::DAY_SECS as u64)),
+            format!("--days {}", n),
+        )),
+        (None, None) => None,
+    };
+    if let Some((target, flag)) = paced {
         let total_bytes = if cost.budget_drives_stop() {
             cost::budget_bytes(cfg.budget_micro, &cost, &pricing, cfg.part_size)
         } else {
             // No per-byte cost means the budget cannot say how many bytes to
             // write, so there is nothing to spread — the user has to bound it.
-            cfg.total_size.context(
-                "模式 {} 没有按字节计费的即时成本,--duration 无从推导写入量;\
-                 请补 --total-size,或换用 crr 模式",
-            )?
+            cfg.total_size.with_context(|| {
+                format!(
+                    "模式 {} 当前没有按字节计费的即时成本,{} 无从推导要写多少字节;\
+                     请补 --total-size 指定写入量,或用 --dest-region 配上跨区复制\
+                     让流量费成为成本引擎",
+                    cfg.mode, flag
+                )
+            })?
         };
         let (min, max) = config::pace_rate(total_bytes, target)?;
         cfg.rate_min = min;
         cfg.rate_max = max;
         let avg = (min + max) / 2;
         println!(
-            "{} 按 --duration {} 规划:平均 {}(区间 {} – {})",
+            "{} 按 {} 规划:平均 {}(区间 {} – {})",
             "ℹ".blue(),
-            humantime::format_duration(target),
+            flag,
             crate::s3::fmt_rate(avg).bold(),
             crate::s3::fmt_rate(min),
             crate::s3::fmt_rate(max)
@@ -432,6 +474,52 @@ pub async fn prepare(args: RunArgs) -> Result<RunContext> {
                  届时预算照样烧完,只是比 {} 更久",
                 "⚠".yellow(),
                 humantime::format_duration(target)
+            );
+        }
+    }
+    // An hour whose ceiling cannot buy the smallest object the scheduler would
+    // schedule parks the run forever: every hour it finds nothing plannable,
+    // sleeps, and wakes to the same answer. Say so now instead.
+    //
+    // Both halves have to match what the scheduler actually does, or the guard
+    // draws its line somewhere the run does not: the LEANEST hour the band can
+    // draw (not the average), priced by the same `object_cost_micro` the meter
+    // enforces with (not `budget_bytes`, which leaves out the per-object
+    // requests). Getting either wrong leaves exactly the hang this prevents.
+    if let (Some(days), Some(cap)) = (days, cfg.daily_cap_micro()) {
+        let (leanest_hour, _) = quota::hour_band(cap / 24);
+        let smallest = if cost.budget_drives_stop() {
+            budget::MIN_TAIL_OBJECT
+        } else {
+            // Request-only modes never shrink an object; a whole one has to fit.
+            cfg.object_size_min
+        };
+        let need = cost::object_cost_micro(smallest, &cost, &pricing, cfg.part_size);
+        if leanest_hour < need {
+            // Spelled to 6 decimals, not through `fmt_usd`: every amount in
+            // this message is sub-cent by definition, and "只有 $0.00,买不起
+            // 一个 $0.00 的对象" is what 2 decimals turns the reason into.
+            bail!(
+                "预算 {} 摊到 {} 天后,最少的那一小时只有 ${:.6},买不起一个 {} 的对象(${:.6}),\
+                 运行会一直空转。请减少 --days 或提高 --budget",
+                fmt_usd(cfg.budget_micro),
+                days,
+                leanest_hour as f64 / 1e6,
+                fmt_bytes(smallest),
+                need as f64 / 1e6
+            );
+        }
+    }
+    // `--max-duration` is one of the remembered params, so it can be in force
+    // without being typed today — and a fallback that fires on day 1 of a
+    // 30-day plan looks like the tool giving up rather than like a bound.
+    if let (Some(days), Some(max)) = (days, max_duration) {
+        if max.as_secs() < days.saturating_mul(quota::DAY_SECS as u64) {
+            println!(
+                "{} --max-duration {} 早于 --days {} 的计划终点:到点会强制停,预算烧不完",
+                "⚠".yellow(),
+                humantime::format_duration(max),
+                days
             );
         }
     }
@@ -530,6 +618,7 @@ pub async fn prepare(args: RunArgs) -> Result<RunContext> {
         bucket: Some(remember_bucket),
         budget_micro: Some(remember_budget),
         duration_secs: duration.map(|d| d.as_secs()),
+        days,
         region: region.clone(),
         profile: profile.clone(),
         dest_regions: dest_regions.clone(),
@@ -543,6 +632,43 @@ pub async fn prepare(args: RunArgs) -> Result<RunContext> {
 
 fn path_string(path: PathBuf) -> String {
     path.to_string_lossy().into_owned()
+}
+
+/// Ask how many days the budget should be spread over, and show what that works
+/// out to per day and per hour before anything is spent.
+///
+/// `0` means no limit — what this tool did before `--days` existed, burn as fast
+/// as the link allows. It is the cold default so that pressing Enter on a first
+/// run keeps the old behaviour; from the second run on, last time's answer is
+/// the default, which is what keeps a multi-day plan's ceiling alive across the
+/// restarts such a plan is guaranteed to have.
+fn prompt_days(budget_micro: u64, last_days: Option<u64>) -> Result<Option<u64>> {
+    let days = inquire::CustomType::<u64>::new("分几天烧完?")
+        .with_default(last_days.unwrap_or(0))
+        .with_help_message(
+            "每天最多烧 预算÷天数(硬上限),再摊到每小时:整点重取本小时额度并据此配速。0 = 不限,能多快烧多快",
+        )
+        .prompt()?;
+    if days == 0 {
+        return Ok(None);
+    }
+    let per_day = config::split_over_days(budget_micro, days)?;
+    // Spelled out here rather than only on the estimate page: the estimate is
+    // several AWS round-trips away, and this is the moment the number was chosen.
+    let per_hour = per_day / 24;
+    let (lo, hi) = quota::hour_band(per_hour);
+    println!(
+        "  {}",
+        format!(
+            "每天 {}(硬上限)· 每小时约 {},整点在 {} – {} 间重取",
+            fmt_usd(per_day),
+            fmt_usd(per_hour),
+            fmt_usd(lo),
+            fmt_usd(hi)
+        )
+        .dimmed()
+    );
+    Ok(Some(days))
 }
 
 /// An explicit `--checkpoint` wins. Otherwise the state directory — except

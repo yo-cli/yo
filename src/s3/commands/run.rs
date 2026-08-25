@@ -6,14 +6,16 @@ use anyhow::{Context, Result};
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use super::args::RunArgs;
-use super::background::{say, spawn_reporter, spawn_signal_handler, spawn_sweeper};
+use super::background::{
+    say, spawn_hourly_pacer, spawn_reporter, spawn_signal_handler, spawn_sweeper,
+};
 use super::preflight::{self, RunContext};
 use crate::s3::budget::BudgetMeter;
 use crate::s3::checkpoint::Checkpoint;
@@ -21,6 +23,7 @@ use crate::s3::config::{BenchConfig, RateMode, StopWhen};
 use crate::s3::limiter::RateLimiter;
 use crate::s3::metrics::{Metrics, RunSummary};
 use crate::s3::pool::BufferPool;
+use crate::s3::quota::DayPlan;
 use crate::s3::registry::{abort_orphans, UploadRegistry};
 use crate::s3::uploader::{ObjectOutcome, UploadCtx};
 use crate::s3::{fmt_bytes, fmt_rate, fmt_usd, sweep};
@@ -57,13 +60,19 @@ pub async fn run(args: RunArgs) -> Result<()> {
     // --- shared components ---
     let limiter = Arc::new(RateLimiter::new(cfg.rate_min, cfg.rate_max));
     let metrics = Arc::new(Metrics::new());
-    let budget = Arc::new(BudgetMeter::new(
+    let mut meter = BudgetMeter::new(
         cfg.budget_micro,
         ckpt.burned_micro,
         pricing.clone(),
         cost,
         cfg.part_size,
-    ));
+    );
+    if let Some(days) = cfg.days {
+        // The ledger comes from the checkpoint: a restart inside the same hour
+        // picks it up where it stopped, at the ceiling it was already spending.
+        meter = meter.with_plan(DayPlan::new(cfg.budget_micro, days, &ckpt.plan));
+    }
+    let budget = Arc::new(meter);
     let registry = Arc::new(UploadRegistry::new());
     let cancel = CancellationToken::new();
     let uctx = Arc::new(UploadCtx {
@@ -144,6 +153,9 @@ pub async fn run(args: RunArgs) -> Result<()> {
         });
     }
     let backlog_pending = Arc::new(AtomicU64::new(0));
+    // Set while the run is sleeping off a spent hourly or daily ceiling, so the
+    // periodic tasks do not fill a nohup log with "瞬时 0 B/s" for hours.
+    let paused = Arc::new(AtomicBool::new(false));
     spawn_reporter(
         &cfg,
         metrics.clone(),
@@ -154,9 +166,19 @@ pub async fn run(args: RunArgs) -> Result<()> {
         cancel.clone(),
         mode.clone(),
         backlog_pending.clone(),
+        paused.clone(),
     );
     if !cfg.dry_run && cfg.retain > Duration::ZERO {
         spawn_sweeper(&cfg, s3.clone(), mode.destinations(), pb.clone(), cancel.clone());
+    }
+    if cfg.days.is_some() {
+        spawn_hourly_pacer(
+            budget.clone(),
+            limiter.clone(),
+            pb.clone(),
+            cancel.clone(),
+            paused.clone(),
+        );
     }
 
     // --- scheduler loop ---
@@ -175,13 +197,18 @@ pub async fn run(args: RunArgs) -> Result<()> {
             break;
         }
 
-        // top up in-flight objects
+        // top up in-flight objects. A secondary bound stopping the top-up is
+        // not the same as running out of money: the run is finished, and must
+        // not be parked until tomorrow by the daily ceiling below.
+        let mut has_hit_secondary_bound = false;
         while inflight.len() < cfg.concurrent_objects && !cancel.is_cancelled() {
             if matches!(cfg.stop_when, StopWhen::Any) {
                 if cfg.iterations.is_some_and(|n| next_iteration >= n) {
+                    has_hit_secondary_bound = true;
                     break;
                 }
                 if cfg.total_size.is_some_and(|t| scheduled_bytes >= t) {
+                    has_hit_secondary_bound = true;
                     break;
                 }
             }
@@ -209,6 +236,49 @@ pub async fn run(args: RunArgs) -> Result<()> {
         }
 
         if inflight.is_empty() {
+            // Nothing plannable and nothing in the air. Either the budget is
+            // gone — or only this hour's / today's slice of it is, and the run
+            // just waits. A secondary bound getting here first is neither: that
+            // run is done.
+            let pause = if has_hit_secondary_bound {
+                None
+            } else {
+                budget.required_pause(cfg.object_size_min)
+            };
+            if let Some(pause) = pause {
+                // A rehearsal must not sit out the wait: --dry-run exists to
+                // check the plan in a minute, and sleeping to the next boundary
+                // would make a 30-day plan take 30 days to rehearse. Reaching
+                // the first ceiling IS the answer it was asked for.
+                if cfg.dry_run {
+                    local_stop = Some(format!(
+                        "--dry-run:{}额度已烧满({} / {}),演练到此为止(实跑会休眠到 {} 继续)",
+                        pause.period.label(),
+                        fmt_usd(pause.burned_micro),
+                        fmt_usd(pause.cap_micro),
+                        pause.resets_at.format("%Y-%m-%d %H:%M UTC")
+                    ));
+                    break;
+                }
+                say(
+                    &pb,
+                    format!(
+                        "🌙 {}额度已烧满({} / {}),休眠到 {}(约 {}),届时自动继续",
+                        pause.period.label(),
+                        fmt_usd(pause.burned_micro),
+                        fmt_usd(pause.cap_micro),
+                        pause.resets_at.format("%Y-%m-%d %H:%M UTC"),
+                        humantime::format_duration(pause.wait)
+                    ),
+                );
+                paused.store(true, Ordering::Relaxed);
+                tokio::select! {
+                    _ = cancel.cancelled() => {}
+                    _ = tokio::time::sleep(pause.wait) => {}
+                }
+                paused.store(false, Ordering::Relaxed);
+                continue;
+            }
             local_stop.get_or_insert_with(|| "预算烧满(硬上限)".to_string());
             break;
         }
@@ -348,6 +418,12 @@ fn sync_ckpt(
     session_start: Instant,
 ) {
     ckpt.burned_micro = budget.burned_micro();
+    // Only when the ceilings are armed: a run that temporarily drops `--days`
+    // must not erase the hour and day it was in the middle of, or re-adding the
+    // flag a minute later would hand both a second full quota.
+    if let Some(plan) = budget.plan() {
+        ckpt.plan = plan.ledger();
+    }
     ckpt.active_secs = base_active + session_start.elapsed().as_secs();
     ckpt.slowdown_total = base_slowdown + metrics.slowdowns.load(Ordering::Relaxed);
     ckpt.error_total = base_errors + metrics.errors.load(Ordering::Relaxed);
@@ -394,6 +470,7 @@ async fn finish(
         active_secs,
         stop_reason: reason.to_string(),
         budget_usd: cfg.budget_micro as f64 / 1e6,
+        daily_cap_usd: cfg.daily_cap_micro().map(|m| m as f64 / 1e6),
         burned_usd: budget.burned_micro() as f64 / 1e6,
         burned_transfer_usd: budget.transfer_micro() as f64 / 1e6,
         burned_request_usd: budget.request_micro() as f64 / 1e6,
@@ -422,6 +499,16 @@ async fn finish(
         fmt_usd(budget.request_micro()),
         fmt_usd(cfg.budget_micro)
     );
+    if let Some(plan) = budget.plan() {
+        println!(
+            "  今日已烧:   {} / {}(每天硬上限,预算摊到 {} 天);本小时 {} / {}",
+            fmt_usd(plan.day().burned()),
+            fmt_usd(plan.day().cap()),
+            cfg.days.unwrap_or(1),
+            fmt_usd(plan.hour().burned()),
+            fmt_usd(plan.hour().cap())
+        );
+    }
     println!(
         "  写入:       {} 个对象 / {},平均吞吐 {}",
         summary.objects_completed,

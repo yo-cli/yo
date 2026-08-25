@@ -22,6 +22,7 @@ pub struct LastRun {
     pub bucket: Option<String>,
     pub budget_micro: Option<u64>,
     pub duration_secs: Option<u64>,
+    pub days: Option<u64>,
     pub region: Option<String>,
     pub profile: Option<String>,
     pub dest_regions: Vec<String>,
@@ -139,6 +140,21 @@ mod tests {
         assert!(txt.contains("--duration 1day"), "{}", txt);
         assert!(txt.contains("--dest-region us-west-2,eu-west-1"), "{}", txt);
         assert!(!txt.contains("--region "), "未复用的不该出现: {}", txt);
+    }
+
+    /// `--days` is remembered, but as the DEFAULT of its prompt — like
+    /// `--bucket` and `--budget`, and unlike the flags recalled silently. A
+    /// prompted answer is already on screen; listing it again as "沿用上次" would
+    /// claim the user did not just type it.
+    #[test]
+    fn prompted_params_are_remembered_without_being_listed_as_recalled() {
+        let last = LastRun {
+            days: Some(30),
+            bucket: Some("b".into()),
+            budget_micro: Some(1),
+            ..Default::default()
+        };
+        assert_eq!(last.describe_reused(&["days", "bucket", "budget"]), "");
     }
 
     #[test]

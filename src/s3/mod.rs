@@ -21,6 +21,7 @@ pub mod metrics;
 pub mod modes;
 pub mod netpath;
 pub mod pool;
+pub mod quota;
 pub mod registry;
 pub mod sweep;
 pub mod uploader;

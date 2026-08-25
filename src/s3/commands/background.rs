@@ -1,9 +1,10 @@
 // Background tasks spawned by the run orchestrator: signal handler,
 // periodic reporter (progress bar + log line), and the retention sweeper.
 
+use chrono::Utc;
 use colored::Colorize;
 use indicatif::ProgressBar;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
@@ -13,6 +14,7 @@ use crate::s3::config::BenchConfig;
 use crate::s3::limiter::RateLimiter;
 use crate::s3::metrics::Metrics;
 use crate::s3::modes::{BurnMode, DestTarget, ObserveCtx};
+use crate::s3::quota::HOUR_SECS;
 use crate::s3::{fmt_bytes, fmt_rate, fmt_usd, sweep};
 
 const SWEEP_INTERVAL: Duration = Duration::from_secs(600);
@@ -82,6 +84,7 @@ pub fn spawn_reporter(
     cancel: CancellationToken,
     mode: Arc<dyn BurnMode>,
     backlog_pending: Arc<AtomicU64>,
+    paused: Arc<AtomicBool>,
 ) {
     let interval = cfg.report_interval;
     let bucket = cfg.bucket.clone();
@@ -102,6 +105,14 @@ pub fn spawn_reporter(
             tokio::select! {
                 _ = cancel.cancelled() => break,
                 _ = tokio::time::sleep(interval) => {}
+            }
+            // Sleeping off a spent hourly or daily ceiling: the pause line already
+            // said when the run wakes, and a day of these would bury it.
+            if paused.load(Ordering::Relaxed) {
+                last_bytes = metrics.bytes_completed.load(Ordering::Relaxed);
+                last_tick = Instant::now();
+                starved_ticks = 0;
+                continue;
             }
             let bytes = metrics.bytes_completed.load(Ordering::Relaxed);
             let dt = last_tick.elapsed().as_secs_f64().max(0.001);
@@ -149,6 +160,19 @@ pub fn spawn_reporter(
                     }
                 }
             }
+            // With `--days` armed, these are the numbers the operator actually
+            // watches: the hour says whether the pace is on plan right now, the
+            // day is what the AWS daily bill will say.
+            let ceilings_txt = match budget.plan() {
+                Some(plan) => format!(
+                    " | 本小时 {}/{} | 今日 {}/{}",
+                    fmt_usd(plan.hour().burned()),
+                    fmt_usd(plan.hour().cap()),
+                    fmt_usd(plan.day().burned()),
+                    fmt_usd(plan.day().cap())
+                ),
+                None => String::new(),
+            };
             // ETA only means something when cost accrues per byte written.
             let per_byte = budget.cost().micro_per_byte();
             let eta = if per_byte > 0.0 && inst > 0 {
@@ -164,13 +188,14 @@ pub fn spawn_reporter(
             say(
                 &pb,
                 format!(
-                    "📊 瞬时 {} | 目标 {} | 已烧 {}{}/{}({:.1}%) | 对象 {} 完成 | 重试 {} | SlowDown {}{}{}",
+                    "📊 瞬时 {} | 目标 {} | 已烧 {}{}/{}({:.1}%){} | 对象 {} 完成 | 重试 {} | SlowDown {}{}{}",
                     fmt_rate(inst),
                     fmt_rate(target),
                     fmt_usd(burned),
                     inflight_txt,
                     fmt_usd(budget_total),
                     burned as f64 / budget_total as f64 * 100.0,
+                    ceilings_txt,
                     metrics.objects_done.load(Ordering::Relaxed),
                     metrics.parts_retried.load(Ordering::Relaxed),
                     metrics.slowdowns.load(Ordering::Relaxed),
@@ -206,6 +231,57 @@ pub fn spawn_reporter(
                 }
             } else {
                 starved_ticks = 0;
+            }
+        }
+    });
+}
+
+/// `--days` re-plans the pace at the top of every hour.
+///
+/// Each hour draws its own ceiling (see s3::quota), and the rate has to follow
+/// it: left centred on the average, a heavy hour could never be reached and the
+/// plan would run systematically slow — the shortfall would be one-sided,
+/// because the lean hours still stop at their own ceiling. The pace is always
+/// "this hour's ceiling spread over a whole hour", never over whatever is left
+/// of it, so a restart at :55 simply under-burns that hour instead of trying to
+/// cram an hour's money into five minutes.
+pub fn spawn_hourly_pacer(
+    budget: Arc<BudgetMeter>,
+    limiter: Arc<RateLimiter>,
+    pb: ProgressBar,
+    cancel: CancellationToken,
+    paused: Arc<AtomicBool>,
+) {
+    tokio::spawn(async move {
+        // Only spawned for a `--days` run, so the plan is there for the whole
+        // life of the task — looking it up once says so.
+        let Some(plan) = budget.plan() else { return };
+        loop {
+            let cap = plan.hour().cap();
+            if let Some(rate) = budget.rate_for(cap, HOUR_SECS as u64) {
+                let (min, max) = limiter.recentre(rate);
+                // Silent while the run is sitting out a day-long ceiling: the
+                // pace still gets re-planned, but 24 of these lines would bury
+                // the pause banner that says when it wakes.
+                if !paused.load(Ordering::Relaxed) {
+                    say(
+                        &pb,
+                        format!(
+                            "🕐 本小时额度 {},配速 {}(区间 {} – {})",
+                            fmt_usd(cap),
+                            fmt_rate(rate),
+                            fmt_rate(min),
+                            fmt_rate(max)
+                        ),
+                    );
+                }
+            }
+            // A second of slack: waking a hair early would find the hour not
+            // yet rolled and re-plan against the ceiling just spent.
+            let wait = plan.hour().until_reset(Utc::now()) + Duration::from_secs(1);
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                _ = tokio::time::sleep(wait) => {}
             }
         }
     });

@@ -9,6 +9,7 @@ use std::fs;
 use std::path::Path;
 
 use super::config::ConfigSnapshot;
+use super::quota::PlanLedger;
 
 pub const CHECKPOINT_VERSION: u32 = 1;
 
@@ -22,6 +23,12 @@ pub struct Checkpoint {
     pub completed_bytes: u64,
     /// Immediate cost burned so far, micro-dollars (see budget.rs).
     pub burned_micro: u64,
+    /// `--days` ledger: which hour and day are being spent, and how much of
+    /// each is gone. Default (all zero) when the run has no ceilings, and in
+    /// checkpoints written before `--days` existed. Without it a restart would
+    /// draw itself a second hour's quota, and a second day's.
+    #[serde(default)]
+    pub plan: PlanLedger,
     pub started_at: DateTime<Utc>,
     /// Accumulated active run time across resumes, for throughput accounting.
     pub active_secs: u64,
@@ -38,6 +45,7 @@ impl Checkpoint {
             completed_iterations: 0,
             completed_bytes: 0,
             burned_micro: 0,
+            plan: PlanLedger::default(),
             started_at: Utc::now(),
             active_secs: 0,
             slowdown_total: 0,
@@ -120,6 +128,7 @@ mod tests {
             bucket: "b".into(),
             key_prefix: "p/".into(),
             budget_micro: 1_000_000,
+            daily_cap_micro: 0,
             endpoint_url: None,
             object_size_min: 100 * MIB,
             object_size_max: 100 * MIB,
@@ -241,6 +250,30 @@ mod tests {
                 name
             );
         }
+    }
+
+    /// The `--days` ledger has to survive the process, or a run killed at 12:30
+    /// comes back at 12:31 with a fresh hour's — and day's — quota to spend.
+    #[test]
+    fn the_period_ledger_survives_a_restart() {
+        let path = tmp_path("plan");
+        let mut ckpt = Checkpoint::new("run-1".into(), snapshot());
+        assert!(ckpt.plan.hour_start.is_none(), "没配 --days 时不该有账本");
+        ckpt.plan = PlanLedger {
+            hour_start: Some("2026-08-25T12:00:00Z".parse().unwrap()),
+            hour_cap_micro: 1_300_000,
+            hour_burned_micro: 900_000,
+            day_start: Some("2026-08-25T00:00:00Z".parse().unwrap()),
+            day_burned_micro: 7_500_000,
+        };
+        ckpt.save(&path).unwrap();
+
+        let loaded = Checkpoint::load(&path).unwrap();
+        assert_eq!(loaded.plan.hour_cap_micro, 1_300_000, "重启要用原来那个上限");
+        assert_eq!(loaded.plan.hour_burned_micro, 900_000);
+        assert_eq!(loaded.plan.day_burned_micro, 7_500_000);
+        assert_eq!(loaded.plan.day_start, ckpt.plan.day_start);
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]

@@ -41,9 +41,16 @@ pub struct RateLimiter {
     state: Mutex<Bucket>,
     /// Target rate in bytes/sec. Written by the sampler, read by acquirers.
     rate: AtomicU64,
-    /// Bounds the target is sampled from. Lowered by `clamp_to_observed`.
+    /// Bounds the target is sampled from. Lowered by `clamp_to_observed`,
+    /// moved wholesale by `recentre`.
     min: AtomicU64,
     max: AtomicU64,
+    /// The band the last `clamp_to_observed` settled on — the network's
+    /// verdict. `recentre` is a plan's wish and may move freely below it, but
+    /// never above, and falls back onto it when the plan is out of reach.
+    /// Wide open until something clamps.
+    floor: AtomicU64,
+    ceiling: AtomicU64,
 }
 
 impl RateLimiter {
@@ -56,6 +63,8 @@ impl RateLimiter {
             rate: AtomicU64::new(min.max(1)),
             min: AtomicU64::new(min.max(1)),
             max: AtomicU64::new(max.max(min).max(1)),
+            floor: AtomicU64::new(1),
+            ceiling: AtomicU64::new(u64::MAX),
         };
         limiter.resample();
         limiter
@@ -106,8 +115,43 @@ impl RateLimiter {
         }
         self.min.store(min, Ordering::Relaxed);
         self.max.store(max, Ordering::Relaxed);
+        // Latch the whole band, not just its top: a later `recentre` must be
+        // able to fall back onto THIS range rather than pin itself at the
+        // ceiling of a range the measurement was backing away from.
+        self.floor.store(min, Ordering::Relaxed);
+        self.ceiling.store(max, Ordering::Relaxed);
         self.resample();
         Some((min, max))
+    }
+
+    /// Move the sampling range onto a new average, keeping the jitter shape.
+    ///
+    /// `--days` re-plans the pace every hour, because each hour draws its own
+    /// ceiling and a rate left centred on the average would leave the fat hours
+    /// unreachable — the plan would then run systematically slow. Unlike
+    /// `clamp_to_observed` this may raise the range, but never above the
+    /// ceiling a clamp established: a plan that cannot be delivered only makes
+    /// the run take longer, it never makes it safe to saturate the link again.
+    pub fn recentre(&self, avg: u64) -> (u64, u64) {
+        let (want_min, want_max) = super::config::jitter_bounds(avg);
+        let clamped_min = self.floor.load(Ordering::Relaxed);
+        let clamped_max = self.ceiling.load(Ordering::Relaxed);
+        // Intersect the plan's band with what a clamp decided the link carries.
+        // When the plan sits entirely above that, take the CLAMP'S OWN band
+        // whole: trimming the top alone would collapse min onto max and pin the
+        // run at the very ceiling the clamp was backing away from, with the
+        // jitter gone too — the opposite of what clamping is for.
+        let (min, max) = if want_min >= clamped_max {
+            (clamped_min, clamped_max)
+        } else {
+            (want_min, want_max.min(clamped_max))
+        };
+        let max = max.max(1);
+        let min = min.max(1).min(max);
+        self.min.store(min, Ordering::Relaxed);
+        self.max.store(max, Ordering::Relaxed);
+        self.resample();
+        (min, max)
     }
 
     /// Acquire `bytes` tokens, sleeping as needed. Cancellation-safe: dropping
@@ -308,6 +352,39 @@ mod tests {
         let (_, lowered) = limiter.clamp_to_observed(40 * MIB).expect("must clamp");
         assert_eq!(limiter.clamp_to_observed(900 * MIB), None, "must not rebound");
         assert_eq!(limiter.bounds().1, lowered);
+    }
+
+    /// Every hour `--days` moves the range onto that hour's own ceiling —
+    /// upward as readily as downward, or the fat hours would never be reachable.
+    #[test]
+    fn recentring_moves_the_range_in_both_directions() {
+        let limiter = RateLimiter::new(100 * MIB, 100 * MIB);
+        let (min, max) = limiter.recentre(200 * MIB);
+        assert!(min < 200 * MIB && max > 200 * MIB, "[{}, {}]", min, max);
+        assert!((min..=max).contains(&limiter.rate()), "new target must take effect at once");
+        let (min, max) = limiter.recentre(50 * MIB);
+        assert!(max < 100 * MIB, "lowering must take effect too: {}", max);
+        assert!(min < max, "range collapsed");
+    }
+
+    /// The network's verdict outranks the plan's wish: once a clamp has decided
+    /// what the link carries, no later hour may plan its way back above it.
+    #[test]
+    fn recentring_never_climbs_back_over_a_clamp() {
+        let limiter = RateLimiter::new(200 * MIB, 500 * MIB);
+        let (clamped_min, clamped) = limiter.clamp_to_observed(126 * MIB).expect("must clamp");
+
+        // A plan far above the clamp must land on the CLAMP'S band, not pinned
+        // at its ceiling: trimming only the top would leave min == max, killing
+        // the jitter and parking the run at the very rate the clamp backed away
+        // from — the run would then starve exactly as it did before clamping.
+        let (min, max) = limiter.recentre(400 * MIB);
+        assert_eq!((min, max), (clamped_min, clamped), "该退回钳位区间,而不是顶在天花板上");
+        assert!(min < max, "抖动被压平了: [{}, {}]", min, max);
+        assert!((min..=max).contains(&limiter.rate()));
+        // Below the clamp it is still free to move.
+        let (_, max) = limiter.recentre(30 * MIB);
+        assert!(max < clamped);
     }
 
     /// `--rate-min == --rate-max` is a fixed pace; sampling it must not panic
