@@ -112,6 +112,8 @@ pub struct RunSummary {
     pub bytes_completed_objects: u64,
     pub bytes_uploaded_parts: u64,
     pub avg_throughput_bytes_per_sec: u64,
+    /// The rate bounds in force when the run ended — which is not what was
+    /// asked for if the run auto-clamped itself down to the network.
     pub rate_min: u64,
     pub rate_max: u64,
 

@@ -55,8 +55,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
     println!("{} 数据池就绪({:.1}s)", "✓".green(), pool_started.elapsed().as_secs_f64());
 
     // --- shared components ---
-    let limiter = Arc::new(RateLimiter::new(cfg.rate_min));
-    limiter.resample(cfg.rate_min, cfg.rate_max);
+    let limiter = Arc::new(RateLimiter::new(cfg.rate_min, cfg.rate_max));
     let metrics = Arc::new(Metrics::new());
     let budget = Arc::new(BudgetMeter::new(
         cfg.budget_micro,
@@ -118,12 +117,14 @@ pub async fn run(args: RunArgs) -> Result<()> {
     if matches!(cfg.rate_mode, RateMode::Continuous) {
         let limiter = limiter.clone();
         let cancel = cancel.clone();
-        let (min, max, interval) = (cfg.rate_min, cfg.rate_max, cfg.rate_resample_interval);
+        let interval = cfg.rate_resample_interval;
         tokio::spawn(async move {
             loop {
                 tokio::select! {
                     _ = cancel.cancelled() => break,
-                    _ = tokio::time::sleep(interval) => { limiter.resample(min, max); }
+                    // Bounds live in the limiter, so a clamp by the reporter is
+                    // not undone by the next resample.
+                    _ = tokio::time::sleep(interval) => { limiter.resample(); }
                 }
             }
         });
@@ -188,7 +189,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
                 break;
             };
             if matches!(cfg.rate_mode, RateMode::PerObject) {
-                let r = limiter.resample(cfg.rate_min, cfg.rate_max);
+                let r = limiter.resample();
                 say(&pb, format!("🎲 obj #{} 本对象速率 {}", next_iteration, fmt_rate(r)));
             }
             say(
@@ -287,7 +288,10 @@ pub async fn run(args: RunArgs) -> Result<()> {
         .unwrap_or_else(|| "完成".to_string());
 
     let dest_buckets: Vec<String> = mode.destinations().iter().map(|d| d.bucket.clone()).collect();
-    finish(&cfg, &ckpt, &budget, &metrics, &pricing, dest_buckets, &reason, session_start, base_active, backlog_pending.load(Ordering::Relaxed), &s3).await
+    // The bounds actually in force at the end, not what the command line asked
+    // for: an auto-clamped run must not report a pace it stopped using.
+    let rate_bounds = limiter.bounds();
+    finish(&cfg, &ckpt, &budget, &metrics, &pricing, dest_buckets, rate_bounds, &reason, session_start, base_active, backlog_pending.load(Ordering::Relaxed), &s3).await
 }
 
 enum Outcome {
@@ -357,6 +361,7 @@ async fn finish(
     metrics: &Metrics,
     pricing: &crate::s3::cost::Pricing,
     dest_buckets: Vec<String>,
+    rate_bounds: (u64, u64),
     reason: &str,
     session_start: Instant,
     base_active: u64,
@@ -398,8 +403,8 @@ async fn finish(
         bytes_completed_objects: ckpt.completed_bytes,
         bytes_uploaded_parts: session_bytes,
         avg_throughput_bytes_per_sec: avg_bps,
-        rate_min: cfg.rate_min,
-        rate_max: cfg.rate_max,
+        rate_min: rate_bounds.0,
+        rate_max: rate_bounds.1,
         parts_ok: metrics.parts_ok.load(Ordering::Relaxed),
         parts_retried: metrics.parts_retried.load(Ordering::Relaxed),
         slowdown_count: ckpt.slowdown_total,

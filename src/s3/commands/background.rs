@@ -17,6 +17,12 @@ use crate::s3::{fmt_bytes, fmt_rate, fmt_usd, sweep};
 
 const SWEEP_INTERVAL: Duration = Duration::from_secs(600);
 
+/// Report windows of sustained shortfall before the pace is clamped. Long
+/// enough that an object boundary or one slow part cannot trigger it, short
+/// enough (3 × --report-interval, 30s by default) to act well before the SDK's
+/// stalled-stream protection starts killing connections.
+const STARVED_TICKS_BEFORE_CLAMP: u32 = 3;
+
 /// Print through the progress bar when visible, plainly otherwise (nohup logs).
 pub fn say(pb: &ProgressBar, msg: String) {
     if pb.is_hidden() {
@@ -87,9 +93,11 @@ pub fn spawn_reporter(
         // Consecutive ticks where actual throughput fell far short of target.
         // Sustained shortfall means the limiter is handing out permission the
         // network cannot deliver, parts queue up, and connections eventually
-        // starve — better to say so early than let it collapse hours later.
+        // starve — the SDK then kills them as stalled and the run dies on
+        // consecutive object failures. Printing advice was not enough: a run
+        // under nohup collapses hours before anyone reads it, so the reporter
+        // clamps the pace itself.
         let mut starved_ticks: u32 = 0;
-        let mut shortfall_warned = false;
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => break,
@@ -171,29 +179,33 @@ pub fn spawn_reporter(
                 ),
             );
 
-            // Warn once per episode, not every tick.
             if starved {
                 starved_ticks += 1;
-                if starved_ticks >= 3 && !shortfall_warned {
-                    shortfall_warned = true;
-                    say(
-                        &pb,
-                        format!(
-                            "{} 实际吞吐 {} 持续低于目标 {} 的一半 —— 网络已是瓶颈。\n  \
-                             继续下去 part 会排队积压,连接被饿死后 SDK 判定失速并中止上传。\n  \
-                             建议:降到实测水平(--rate-min {} --rate-max {}),\
-                             或用 --duration <时长> 让它自己推导速率",
-                            "⚠".yellow().bold(),
-                            fmt_rate(inst),
-                            fmt_rate(target),
-                            fmt_rate(inst * 3 / 5),
-                            fmt_rate(inst * 9 / 10)
-                        ),
-                    );
+                if starved_ticks >= STARVED_TICKS_BEFORE_CLAMP {
+                    // Reset rather than latch: if the clamped pace still
+                    // outruns the link, the next window clamps again until it
+                    // converges. `None` = already at or below what the network
+                    // delivers, so there is nothing to say.
+                    starved_ticks = 0;
+                    if let Some((min, max)) = limiter.clamp_to_observed(inst) {
+                        say(
+                            &pb,
+                            format!(
+                                "{} 实际吞吐 {} 持续低于目标 {} 的一半 —— 网络已是瓶颈,\
+                                 已自动降速到 {} ~ {}。\n  \
+                                 (再快只会让 part 排队积压,连接被饿死后 SDK 判定失速并中止上传;\
+                                 速率只影响耗时,预算照烧)",
+                                "⚠".yellow().bold(),
+                                fmt_rate(inst),
+                                fmt_rate(target),
+                                fmt_rate(min),
+                                fmt_rate(max)
+                            ),
+                        );
+                    }
                 }
             } else {
                 starved_ticks = 0;
-                shortfall_warned = false;
             }
         }
     });
