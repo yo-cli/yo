@@ -294,6 +294,61 @@ yo-s3 cleanup --bucket my-burn-bucket --all
 - 不可恢复,默认要交互确认;`--yes` 可跳过
 - 自定义端点(MinIO/Ceph)下 `--all` 直接报错:那里本来就没有跨区复制
 
+## 排查:跑挂了怎么看
+
+运行中每 `--report-interval` 一行:
+
+```
+📊 瞬时 307 MiB/s | 目标 384 MiB/s | 已烧 $20.48(在途 $10.24)/$500.00(4.1%) | 对象 2 完成 | 重试 119 | SlowDown 0
+```
+
+| 字段 | 看什么 |
+|---|---|
+| 瞬时 vs 目标 | **实际持续低于目标一半就是麻烦** —— 网络跟不上,part 会排队积压 |
+| 在途 | 当前对象已预留的金额,对象完成才转成「已烧」 |
+| 重试 | 持续增长 = 连接在反复失败,通常是上一条的后果 |
+| SlowDown | S3 在限流你(和网络瓶颈是两回事) |
+
+**吞吐持续不足会主动告警**,不用等它崩:
+
+```
+⚠ 实际吞吐 100 MiB/s 持续低于目标 384 MiB/s 的一半 —— 网络已是瓶颈。
+  继续下去 part 会排队积压,连接被饿死后 SDK 判定失速并中止上传。
+  建议:降到实测水平(--rate-min 60MiB --rate-max 90MiB),或用 --duration <时长> 让它自己推导速率
+```
+
+**单个 part 重试到第 3 次起会打印**(前两次是常态噪音,不打)。默认日志级别就能看到,不用调 `RUST_LOG`。
+
+**对象失败时给全上下文**,不再让你去翻日志:
+
+```
+✗ yo-s3-bench/75cb8faf/obj-000003 上传失败已中止(完成 12/4096 个 part,耗时 843s,
+  当前目标速率 384.24 MiB/s): UploadPart #13 重试 8 次后仍失败: ...
+```
+
+想看更细的可以 `RUST_LOG=debug`,会打出每一次重试和退避时长。
+
+### 常见死法
+
+**`ThroughputBelowMinimum` / `minimum throughput was specified at 1 B/s`**
+不是权限问题,是 AWS SDK 的失速保护:连接连续 5 秒零字节就判死。根因几乎总是**目标速率超过实例网络基线** —— EC2 超出带宽配额时会先排队再丢包,连接因此饿死。
+
+确认方法(需要 ENA 驱动 2.2.10+):
+
+```bash
+ethtool -S eth0 | grep bw_out_allowance_exceeded   # 这个数在涨 = 实锤被限速
+```
+
+查你这台机器的基线带宽(**控制台不显示,只能用 CLI**):
+
+```bash
+aws ec2 describe-instance-types --filters "Name=instance-type,Values=m5.*" \
+  --query "InstanceTypes[].[InstanceType, NetworkInfo.NetworkPerformance, NetworkInfo.NetworkCards[0].BaselineBandwidthInGbps]" \
+  --output table
+```
+
+解法是降速到基线以下,不是提配额 —— **网络带宽不是 Service Quota,提不了工单**。
+
 ## 状态存储与单实例护栏
 
 运行状态放在 **`~/.yo/s3/<桶>-<哈希>/`**:`ckpt.json`(断点续跑)、`summary.json`、`run.lock`。目录身份是 `(endpoint, bucket, key-prefix)` 的哈希 —— 一本预算账对应一个目录,跟你在哪个工作目录敲命令无关。

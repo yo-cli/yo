@@ -235,9 +235,13 @@ pub async fn run(args: RunArgs) -> Result<()> {
                 consecutive_failures += 1;
                 say(&pb, format!("{} {}", "✗".red(), desc));
                 if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                    // Report what actually failed. The old wording asserted
+                    // "疑似权限/配置问题" for every cause, which sent the user
+                    // hunting through IAM after a throughput timeout.
                     local_stop = Some(format!(
-                        "连续 {} 个对象失败,疑似权限/配置问题,停止",
-                        MAX_CONSECUTIVE_FAILURES
+                        "连续 {} 个对象失败,停止。最后一次: {}",
+                        MAX_CONSECUTIVE_FAILURES,
+                        brief(&desc)
                     ));
                     cancel.cancel();
                     break;
@@ -283,13 +287,22 @@ enum Outcome {
     Failed(String),
 }
 
+/// Keep the stop reason (which lands in the JSON summary) readable: the full
+/// SDK error chain is already on the ✗ line above.
+fn brief(desc: &str) -> String {
+    const MAX: usize = 220;
+    let one_line = desc.replace('\n', " ");
+    match one_line.char_indices().nth(MAX) {
+        Some((cut, _)) => format!("{}…", &one_line[..cut]),
+        None => one_line,
+    }
+}
+
 fn flatten_outcome(joined: Result<Result<ObjectOutcome>, tokio::task::JoinError>) -> Outcome {
     match joined {
         Ok(Ok(ObjectOutcome::Completed { key, bytes })) => Outcome::Completed { key, bytes },
         Ok(Ok(ObjectOutcome::Aborted { cancelled: true, .. })) => Outcome::Cancelled,
-        Ok(Ok(ObjectOutcome::Aborted { key, cancelled: false })) => {
-            Outcome::Failed(format!("{} 上传失败已中止(详见上方日志)", key))
-        }
+        Ok(Ok(ObjectOutcome::Aborted { reason, .. })) => Outcome::Failed(reason),
         Ok(Err(e)) => Outcome::Failed(format!("对象任务失败: {:#}", e)),
         Err(join_err) => Outcome::Failed(format!("对象任务 panic: {}", join_err)),
     }
@@ -441,4 +454,27 @@ async fn finish(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::brief;
+
+    /// The stop reason goes into the JSON summary; a full SDK error chain
+    /// there is unreadable, but it must still name the actual failure rather
+    /// than guess at a cause.
+    #[test]
+    fn brief_trims_without_losing_the_head() {
+        let long = format!("obj-000003 上传失败已中止(完成 12/4096 个 part): {}", "x".repeat(500));
+        let out = brief(&long);
+        assert!(out.starts_with("obj-000003 上传失败已中止(完成 12/4096 个 part)"), "{}", out);
+        assert!(out.ends_with('…'));
+        assert!(out.chars().count() <= 221, "{} chars", out.chars().count());
+    }
+
+    #[test]
+    fn brief_keeps_short_reasons_intact_and_single_line() {
+        assert_eq!(brief("简短原因"), "简短原因");
+        assert_eq!(brief("第一行\n  第二行"), "第一行   第二行");
+    }
 }

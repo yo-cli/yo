@@ -84,6 +84,12 @@ pub fn spawn_reporter(
     tokio::spawn(async move {
         let mut last_bytes: u64 = 0;
         let mut last_tick = Instant::now();
+        // Consecutive ticks where actual throughput fell far short of target.
+        // Sustained shortfall means the limiter is handing out permission the
+        // network cannot deliver, parts queue up, and connections eventually
+        // starve — better to say so early than let it collapse hours later.
+        let mut starved_ticks: u32 = 0;
+        let mut shortfall_warned = false;
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => break,
@@ -94,6 +100,11 @@ pub fn spawn_reporter(
             let inst = ((bytes - last_bytes) as f64 / dt) as u64;
             last_bytes = bytes;
             last_tick = Instant::now();
+
+            let target = limiter.rate();
+            // Only meaningful once data is actually moving; a tick during pool
+            // generation or between objects is not a shortfall.
+            let starved = inst > 0 && target > 0 && inst < target / 2;
 
             let burned = budget.burned_micro();
             // In-flight is shown but never added to the bar position: the bar
@@ -145,19 +156,45 @@ pub fn spawn_reporter(
             say(
                 &pb,
                 format!(
-                    "📊 瞬时 {} | 目标 {} | 已烧 {}{}/{}({:.1}%) | 对象 {} 完成 | SlowDown {}{}{}",
+                    "📊 瞬时 {} | 目标 {} | 已烧 {}{}/{}({:.1}%) | 对象 {} 完成 | 重试 {} | SlowDown {}{}{}",
                     fmt_rate(inst),
-                    fmt_rate(limiter.rate()),
+                    fmt_rate(target),
                     fmt_usd(burned),
                     inflight_txt,
                     fmt_usd(budget_total),
                     burned as f64 / budget_total as f64 * 100.0,
                     metrics.objects_done.load(Ordering::Relaxed),
+                    metrics.parts_retried.load(Ordering::Relaxed),
                     metrics.slowdowns.load(Ordering::Relaxed),
                     backlog_txt,
                     eta
                 ),
             );
+
+            // Warn once per episode, not every tick.
+            if starved {
+                starved_ticks += 1;
+                if starved_ticks >= 3 && !shortfall_warned {
+                    shortfall_warned = true;
+                    say(
+                        &pb,
+                        format!(
+                            "{} 实际吞吐 {} 持续低于目标 {} 的一半 —— 网络已是瓶颈。\n  \
+                             继续下去 part 会排队积压,连接被饿死后 SDK 判定失速并中止上传。\n  \
+                             建议:降到实测水平(--rate-min {} --rate-max {}),\
+                             或用 --duration <时长> 让它自己推导速率",
+                            "⚠".yellow().bold(),
+                            fmt_rate(inst),
+                            fmt_rate(target),
+                            fmt_rate(inst * 3 / 5),
+                            fmt_rate(inst * 9 / 10)
+                        ),
+                    );
+                }
+            } else {
+                starved_ticks = 0;
+                shortfall_warned = false;
+            }
         }
     });
 }

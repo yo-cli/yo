@@ -57,8 +57,18 @@ impl UploadCtx {
 }
 
 pub enum ObjectOutcome {
-    Completed { key: String, bytes: u64 },
-    Aborted { key: String, cancelled: bool },
+    Completed {
+        key: String,
+        bytes: u64,
+    },
+    Aborted {
+        key: String,
+        cancelled: bool,
+        /// Why it died, with enough context to act on: which part, how far the
+        /// object got, how long it ran. Previously this only reached tracing
+        /// and the user was told to "see the log above".
+        reason: String,
+    },
 }
 
 enum ErrClass {
@@ -141,7 +151,22 @@ where
                     _ => {
                         metrics.parts_retried.fetch_add(1, Ordering::Relaxed);
                         let delay = backoff_delay(attempt, slow_down);
-                        tracing::debug!(what, attempt, ?delay, "retrying: {}", DisplayErrorContext(&e));
+                        // One or two retries are ordinary noise. From the third
+                        // the trouble is persistent, and the default log filter
+                        // is `warn` — at debug the user sees nothing at all
+                        // while hundreds of retries pile up.
+                        if attempt + 1 >= 3 {
+                            tracing::warn!(
+                                "{} 第 {}/{} 次重试(退避 {:?}): {}",
+                                what,
+                                attempt + 1,
+                                MAX_ATTEMPTS,
+                                delay,
+                                DisplayErrorContext(&e)
+                            );
+                        } else {
+                            tracing::debug!(what, attempt, ?delay, "retrying: {}", DisplayErrorContext(&e));
+                        }
                         tokio::select! {
                             _ = cancel.cancelled() => bail!("cancelled"),
                             _ = tokio::time::sleep(delay) => {}
@@ -187,7 +212,8 @@ async fn upload_part(
     let etag = if ctx.dry_run {
         format!("\"dry-run-{}\"", part_number)
     } else {
-        let out = with_retry(&ctx.metrics, cancel, "UploadPart", || {
+        let what = format!("UploadPart #{}", part_number);
+        let out = with_retry(&ctx.metrics, cancel, &what, || {
             ctx.client
                 .upload_part()
                 .bucket(&ctx.bucket)
@@ -254,6 +280,7 @@ pub async fn upload_object(
     // Per-object child token: the first part failure stops sibling parts fast,
     // and a run-level cancel propagates into it automatically.
     let object_cancel = ctx.cancel.child_token();
+    let object_started = std::time::Instant::now();
     let semaphore = Arc::new(Semaphore::new(ctx.concurrent_parts));
     let n_parts = object_size.div_ceil(ctx.part_size);
     let mut tasks: JoinSet<Result<CompletedPart>> = JoinSet::new();
@@ -295,10 +322,23 @@ pub async fn upload_object(
         abort_upload(&ctx, &key, &upload_id).await;
         ctx.budget.abort_object(object_size);
         ctx.metrics.objects_aborted.fetch_add(1, Ordering::Relaxed);
+        let reason = format!(
+            "{} 上传失败已中止(完成 {}/{} 个 part,耗时 {:.0}s,当前目标速率 {}): {:#}",
+            key,
+            parts.len(),
+            n_parts,
+            object_started.elapsed().as_secs_f64(),
+            crate::s3::fmt_rate(ctx.limiter.rate()),
+            e
+        );
         if !cancelled {
-            tracing::warn!("对象 {} 上传失败,已 abort: {:#}", key, e);
+            tracing::warn!("{}", reason);
         }
-        return Ok(ObjectOutcome::Aborted { key, cancelled });
+        return Ok(ObjectOutcome::Aborted {
+            key,
+            cancelled,
+            reason,
+        });
     }
 
     parts.sort_by_key(|p| p.part_number());
@@ -321,10 +361,21 @@ pub async fn upload_object(
                 ctx.budget.abort_object(object_size);
                 ctx.metrics.objects_aborted.fetch_add(1, Ordering::Relaxed);
                 let cancelled = ctx.cancel.is_cancelled();
+                let reason = format!(
+                    "{} CompleteMultipartUpload 失败已中止({} 个 part 全部上传成功,耗时 {:.0}s): {:#}",
+                    key,
+                    n_parts,
+                    object_started.elapsed().as_secs_f64(),
+                    e
+                );
                 if !cancelled {
-                    tracing::warn!("Complete 失败,已 abort {}: {:#}", key, e);
+                    tracing::warn!("{}", reason);
                 }
-                return Ok(ObjectOutcome::Aborted { key, cancelled });
+                return Ok(ObjectOutcome::Aborted {
+                    key,
+                    cancelled,
+                    reason,
+                });
             }
         }
     }
