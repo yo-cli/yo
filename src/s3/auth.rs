@@ -33,27 +33,93 @@ pub struct AuthOpts<'a> {
 
 /// Make `shared` carry working credentials, prompting if needed. On success the
 /// caller identity has been printed and `shared` is usable.
-pub async fn ensure_credentials(shared: &mut SdkConfig, opts: &AuthOpts<'_>) -> Result<()> {
+///
+/// Returns the profile the user picked at the menu, for the caller to remember
+/// like every other answer that has no default. The auto-reused [yo-s3] profile
+/// is deliberately NOT returned: it is the fallback for an empty chain, and
+/// pinning it would keep spending through stale pasted keys long after the
+/// machine got a proper IAM role.
+pub async fn ensure_credentials(
+    shared: &mut SdkConfig,
+    opts: &AuthOpts<'_>,
+) -> Result<Option<String>> {
     let mut last_err = match caller_identity(shared).await {
         Ok(id) => {
             print_identity(&id);
-            return Ok(());
+            return Ok(None);
         }
         Err(e) => e,
     };
+
+    let mut region: Option<String> = opts.region.map(str::to_string);
+    // Which profile the config is being built from. Tracked for the whole
+    // function because every later rebuild — the region prompt included — has to
+    // keep whatever profile got us that far, instead of silently dropping back
+    // to the default chain that already came up empty.
+    let mut profile: Option<String> = opts.profile.map(str::to_string);
+    // Only what the user actively chose, which is a narrower thing than the
+    // above and the only one worth handing back to be remembered.
+    let mut picked_profile: Option<String> = None;
+
+    // Keys pasted on an earlier run were saved to our own [yo-s3] profile, which
+    // the default chain does not read. Reusing them here is what makes "记住这组
+    // 凭据" mean anything — otherwise every run asks for the same keys again.
+    // Before the --yes bail on purpose: an unattended restart (nohup'd multi-day
+    // burn, reboot) is exactly the case that cannot stop to paste them.
+    if profile.is_none() && saved_profile_exists() {
+        profile = Some(SAVED_PROFILE.to_string());
+        let candidate = load_shared_config(region.as_deref(), profile.as_deref()).await;
+        match caller_identity(&candidate).await {
+            Ok(id) => {
+                println!(
+                    "{} 用上次记住的凭据({} 的 [{}] profile)",
+                    "✓".green(),
+                    aws_credentials_path()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|_| "~/.aws/credentials".to_string()),
+                    SAVED_PROFILE
+                );
+                print_identity(&id);
+                *shared = candidate;
+                return Ok(None);
+            }
+            // Working keys that just carry no region: keep the profile and let
+            // the region prompt below finish the job.
+            Err(e) if is_missing_region(&e) => last_err = e,
+            Err(e) => {
+                eprintln!(
+                    "{} 上次记住的 [{}] 凭据已不可用: {}",
+                    "⚠".yellow(),
+                    SAVED_PROFILE,
+                    brief(&e)
+                );
+                if let Ok(p) = aws_credentials_path() {
+                    eprintln!(
+                        "  {}",
+                        format!(
+                            "重新粘贴会覆盖它;彻底不要就删掉 {} 里的 [{}] 段",
+                            p.display(),
+                            SAVED_PROFILE
+                        )
+                        .dimmed()
+                    );
+                }
+                profile = None;
+            }
+        }
+    }
 
     if opts.yes {
         // Say what is missing, then get out of the way.
         if opts.lenient {
             eprintln!("{} {}", "⚠".yellow(), credential_hint(&last_err).yellow());
             eprintln!("  (--dry-run 模式,继续)");
-            return Ok(());
+            return Ok(None);
         }
         bail!("{}", credential_hint(&last_err));
     }
 
     let on_ec2 = on_ec2().await;
-    let mut region: Option<String> = opts.region.map(str::to_string);
     loop {
         // A missing region is NOT a credential problem, and treating it as one
         // sends a user who already has working credentials off to paste keys
@@ -63,11 +129,11 @@ pub async fn ensure_credentials(shared: &mut SdkConfig, opts: &AuthOpts<'_>) -> 
                 "\n{} 凭据可用,但没有区域(AWS_REGION / profile 里的 region / EC2 元数据都没有)",
                 "✗".red().bold()
             );
-            let picked = inquire::Text::new("AWS 区域?")
+            let region_input = inquire::Text::new("AWS 区域?")
                 .with_default("us-east-1")
                 .prompt()?;
-            region = Some(picked.trim().to_string());
-            let candidate = load_shared_config(region.as_deref(), opts.profile).await;
+            region = Some(region_input.trim().to_string());
+            let candidate = load_shared_config(region.as_deref(), profile.as_deref()).await;
             match caller_identity(&candidate).await {
                 Ok(id) => {
                     print_identity(&id);
@@ -76,7 +142,7 @@ pub async fn ensure_credentials(shared: &mut SdkConfig, opts: &AuthOpts<'_>) -> 
                         format!("下次可直接加 --region {}", region.as_deref().unwrap_or("")).dimmed()
                     );
                     *shared = candidate;
-                    return Ok(());
+                    return Ok(picked_profile);
                 }
                 Err(e) => {
                     last_err = e;
@@ -101,7 +167,7 @@ pub async fn ensure_credentials(shared: &mut SdkConfig, opts: &AuthOpts<'_>) -> 
                     print_identity(&id);
                     offer_to_save(&creds)?;
                     *shared = config;
-                    return Ok(());
+                    return Ok(None);
                 }
                 Err(e) => {
                     eprintln!("{} {:#}", "✗".red(), e);
@@ -109,7 +175,9 @@ pub async fn ensure_credentials(shared: &mut SdkConfig, opts: &AuthOpts<'_>) -> 
                 }
             },
             Choice::Profile(name) => {
-                let config = load_shared_config(region.as_deref(), Some(&name)).await;
+                profile = Some(name.clone());
+                picked_profile = Some(name.clone());
+                let config = load_shared_config(region.as_deref(), profile.as_deref()).await;
                 match caller_identity(&config).await {
                     Ok(id) => {
                         print_identity(&id);
@@ -118,7 +186,7 @@ pub async fn ensure_credentials(shared: &mut SdkConfig, opts: &AuthOpts<'_>) -> 
                             format!("下次可直接加 --profile {} 跳过这一步", name).dimmed()
                         );
                         *shared = config;
-                        return Ok(());
+                        return Ok(picked_profile);
                     }
                     Err(e) => {
                         eprintln!("{} profile {} 不可用: {}", "✗".red(), name, brief(&e));
@@ -134,7 +202,7 @@ pub async fn ensure_credentials(shared: &mut SdkConfig, opts: &AuthOpts<'_>) -> 
             Choice::Quit => {
                 if opts.lenient {
                     eprintln!("{} 未提供凭据,--dry-run 模式继续", "⚠".yellow());
-                    return Ok(());
+                    return Ok(None);
                 }
                 bail!("{}", credential_hint(&last_err));
             }
@@ -177,7 +245,29 @@ fn is_missing_region(err: &anyhow::Error) -> bool {
 fn brief(err: &anyhow::Error) -> String {
     let s = err.to_string();
     // The SDK chain is long; the first sentence carries the diagnosis.
-    s.split(" (").next().unwrap_or(&s).trim().to_string()
+    let head = s.split(" (").next().unwrap_or(&s).trim();
+    // Except when that sentence is the SDK's placeholder for a service error:
+    // "unhandled error" says nothing, while the code and message it wrapped are
+    // the difference between "this key was deleted" and "you lack permission".
+    if head.ends_with("unhandled error") {
+        if let Some(detail) = service_error(&s) {
+            return detail;
+        }
+    }
+    head.to_string()
+}
+
+/// AWS error code + message, dug out of the SDK's debug formatting.
+fn service_error(s: &str) -> Option<String> {
+    let code = between(s, "code: \"", "\"")?;
+    match between(s, "message: \"", "\"") {
+        Some(message) => Some(format!("{}: {}", code, message)),
+        None => Some(code.to_string()),
+    }
+}
+
+fn between<'a>(s: &'a str, start: &str, end: &str) -> Option<&'a str> {
+    s.split_once(start)?.1.split_once(end).map(|(inner, _)| inner)
 }
 
 enum Choice {
@@ -311,14 +401,19 @@ fn offer_to_save(creds: &PastedCreds) -> Result<()> {
     }
     upsert_profile(&path, SAVED_PROFILE, creds)?;
     println!(
-        "{} 已写入 {} 的 [{}] profile。下次加 {} 即可,或 {} 删掉",
+        "{} 已写入 {} 的 [{}] profile,下次自动使用(不想要了就 {} 删掉这一段)",
         "✓".green(),
         path.display(),
         SAVED_PROFILE,
-        format!("--profile {}", SAVED_PROFILE).bold(),
         format!("vi {}", path.display()).bold()
     );
     Ok(())
+}
+
+/// Did an earlier run leave keys we can reuse? Only our own profile counts: the
+/// user's other profiles get offered in the menu, never picked for them.
+fn saved_profile_exists() -> bool {
+    list_profiles().iter().any(|name| name == SAVED_PROFILE)
 }
 
 fn aws_dir() -> Result<PathBuf> {
@@ -527,6 +622,23 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    /// Remembering keys only helps if the name written out is the name the
+    /// reuse path looks for — a rename on either side silently brings back
+    /// "paste the same keys on every run".
+    #[test]
+    fn saved_profile_is_discoverable_after_writing() {
+        let path = tmp_file("discover");
+        upsert_profile(&path, SAVED_PROFILE, &creds("KEY")).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            parse_profile_names(&text, false).contains(&SAVED_PROFILE.to_string()),
+            "{}",
+            text
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
     #[test]
     fn profile_names_parse_from_both_file_shapes() {
         assert_eq!(
@@ -538,6 +650,28 @@ mod tests {
             parse_profile_names("[default]\n[profile prod]\n", true),
             vec!["default", "prod"]
         );
+    }
+
+    /// A rejected key has to be named as such. "service error: unhandled error"
+    /// is the SDK's placeholder and tells the user nothing about whether the
+    /// remembered keys were deleted, disabled, or simply lack permission.
+    #[test]
+    fn a_service_error_is_reported_by_its_code_and_message() {
+        let raw = "service error: unhandled error (InvalidClientTokenId): Error { \
+                   code: \"InvalidClientTokenId\", \
+                   message: \"The security token included in the request is invalid.\", \
+                   aws_request_id: \"abc\" } (ServiceError(ServiceError { .. }))";
+        assert_eq!(
+            brief(&anyhow::anyhow!("{}", raw)),
+            "InvalidClientTokenId: The security token included in the request is invalid."
+        );
+    }
+
+    /// Everything else keeps the first sentence — that is already the diagnosis.
+    #[test]
+    fn other_errors_keep_their_first_sentence() {
+        let e = anyhow::anyhow!("{}", "dispatch failure: io error: connection refused (Inner { .. })");
+        assert_eq!(brief(&e), "dispatch failure: io error: connection refused");
     }
 
     /// The region branch must not fire on a plain credential failure, or the

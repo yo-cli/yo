@@ -265,7 +265,7 @@ Rust SDK 的分包粒度和 Java v2 一致 —— 每个服务一个 crate，`aw
 | 选项 | 出现条件 | 工具能做什么 |
 |------|---------|-------------|
 | 粘贴 Access Key / Secret Key | 总是 | 立刻装上并校验 |
-| 用已有 profile | `~/.aws/{credentials,config}` 里解析出至少一个 | 列名字让用户选，`profile_name()` 重载 |
+| 用已有 profile | `~/.aws/{credentials,config}` 里解析出至少一个 | 列名字让用户选，`profile_name()` 重载；**选中的名字回传给调用方记入 `last-run.json`**，下次自动沿用 |
 | 去挂 IAM Role | IMDS 能取到 instance-id（确实在 EC2 上） | 打印**带实际实例 ID** 的操作步骤后退出。工具没有 IAM 权限，能做的只有精确指路 |
 | 退出 | 总是 | `--dry-run` 下降级继续，否则报错 |
 
@@ -277,6 +277,14 @@ Rust SDK 的分包粒度和 Java v2 一致 —— 每个服务一个 crate，`aw
 - `--profile <名>` 是该菜单的非交互等价物；`AWS_SHARED_CREDENTIALS_FILE` / `AWS_CONFIG_FILE` 与 SDK 保持一致，否则会「列的是这个文件、写的是另一个」。
 
 **落盘位置：`~/.aws/credentials` 的 `[yo-s3]` profile（权限 600），不是私有存储。** 它是 AWS 工具链的约定位置：写完 `aws` CLI 直接可用，用户能自己 vi 改删，不发明格式。写入按 section 精确替换，**不动任何其他 profile**，重复写不堆重复段（均有单测）。
+
+**记住之后必须自动生效，否则「记住」名存实亡。** 落盘只做了一半：AWS 默认凭据链不看 `[yo-s3]`，用户不加 `--profile yo-s3` 下次照样被要求重新粘贴。因此在默认链取不到身份、且用户没显式给 `--profile` 时，先拿 `[yo-s3]` 试一次，**位置在 `--yes` 判断之前**（无人值守重启正是最需要它的场景）：
+
+- 通过 → 打印凭据来自哪个文件的哪个 profile 后继续，不弹任何菜单
+- 不通过 → 说明这组记住的凭据已不可用并给出改/删路径，再落回菜单（重新粘贴会覆盖同一段）
+- 只缺区域 → 保留该 profile，走补问区域分支。**选定的 profile 必须一路带到后续每次重建 config**，否则补完区域又退回空的默认链
+
+**自动兜底的 `[yo-s3]` 与用户选的 profile，记忆待遇不同。** `ensure_credentials` 只回传**用户在菜单里主动选**的 profile；`[yo-s3]` 即便这次生效也不写进 `last-run.json`。它的语义是「默认链空了才兜底」，一旦被 pin 进记忆，用户后来给实例挂上 IAM Role 也会继续走那组早已粘贴的旧密钥 —— 那是退化。兜底靠 §4.5 的自动尝试保证，不靠记忆。
 
 **刻意不复用仓库的 `crypto_utils`**：其密钥是 `SHA256(编译期常量 SALT)`（`crypto_utils.rs:15/39`），每台机器一致且可从二进制提取 —— 那是混淆不是加密。存 GitHub PAT 尚可，用它存 AWS 长期密钥还标注「已加密」是自欺。宁可明文写进那个所有人都知道该 chmod 600 的标准文件。
 

@@ -52,7 +52,8 @@ pub async fn run(args: CleanupArgs) -> Result<()> {
     };
 
     let mut shared = load_shared_config(args.region.as_deref(), args.profile.as_deref()).await;
-    auth::ensure_credentials(
+    // Cleanup keeps no memory of its own — `run` owns last-run.json.
+    let _ = auth::ensure_credentials(
         &mut shared,
         &auth::AuthOpts {
             region: args.region.as_deref(),

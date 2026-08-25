@@ -241,7 +241,7 @@ pub async fn prepare(args: RunArgs) -> Result<RunContext> {
     // common thing to block a first run, so they get the same interactive
     // fill-in rather than a hint telling the user to go solve it elsewhere.
     let mut shared = load_shared_config(cfg.region.as_deref(), profile.as_deref()).await;
-    auth::ensure_credentials(
+    let chosen_profile = auth::ensure_credentials(
         &mut shared,
         &auth::AuthOpts {
             region: cfg.region.as_deref(),
@@ -252,6 +252,9 @@ pub async fn prepare(args: RunArgs) -> Result<RunContext> {
     )
     .await?;
     let shared = shared;
+    // A profile chosen at the credential menu is an answer with no default, like
+    // the bucket: remembering it is what stops the next run from asking again.
+    let profile = chosen_profile.or(profile);
     // The plain client drives every control-plane call (discovery, replication
     // config, sweeps, backlog sampling). The accelerated upload client is built
     // at the end, once acceleration is resolved — the accelerate endpoint is an

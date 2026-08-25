@@ -1,5 +1,6 @@
-// AWS client construction. Credentials always come from the standard chain
-// (EC2 IAM Role via IMDS / env vars / ~/.aws) — the tool never stores keys.
+// AWS client construction. Credentials come from the standard chain (EC2 IAM
+// Role via IMDS / env vars / ~/.aws); when the chain is empty, auth.rs fills it
+// in interactively and can remember the keys as an ~/.aws profile.
 
 use anyhow::{bail, Context, Result};
 use aws_config::{BehaviorVersion, Region, SdkConfig};
