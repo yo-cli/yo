@@ -2,6 +2,7 @@
 // checkpoints + where a run's state lives on disk.
 
 use anyhow::{bail, Context, Result};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -65,7 +66,14 @@ pub struct BenchConfig {
     /// resolving `--transfer-acceleration`. Set by preflight, not by the CLI.
     pub transfer_acceleration: bool,
 
-    pub object_size: u64,
+    /// Objects get a random size in [min, max] — real backup jobs do not emit
+    /// identically sized files, and the budget ledger does not care either way
+    /// (bytes bought is fixed by price, not by how they are chunked).
+    pub object_size_min: u64,
+    pub object_size_max: u64,
+    /// Base name and extension of every object written.
+    pub object_name: String,
+    pub object_ext: String,
     pub part_size: u64,
     pub pool_size: u64,
     pub concurrent_objects: usize,
@@ -106,23 +114,34 @@ impl BenchConfig {
                 fmt_bytes(MAX_PART_SIZE)
             );
         }
-        if self.object_size > MAX_OBJECT_SIZE {
+        if self.object_size_min > self.object_size_max {
+            bail!(
+                "对象大小区间非法:[{}, {}](要求 min ≤ max)",
+                fmt_bytes(self.object_size_min),
+                fmt_bytes(self.object_size_max)
+            );
+        }
+        if self.object_size_max > MAX_OBJECT_SIZE {
             bail!(
                 "对象大小 {} 超出 S3 单对象上限 {}",
-                fmt_bytes(self.object_size),
+                fmt_bytes(self.object_size_max),
                 fmt_bytes(MAX_OBJECT_SIZE)
             );
         }
-        if self.object_size < MIB {
-            bail!("对象大小 {} 太小(至少 1 MiB)", fmt_bytes(self.object_size));
+        if self.object_size_min < MIB {
+            bail!("对象大小 {} 太小(至少 1 MiB)", fmt_bytes(self.object_size_min));
         }
-        let parts = self.object_size.div_ceil(self.part_size);
+        if self.object_name.trim().is_empty() {
+            bail!("--object-name 不能为空");
+        }
+        // The whole range must fit the part limit, so check the big end.
+        let parts = self.object_size_max.div_ceil(self.part_size);
         if parts > MAX_PARTS_PER_OBJECT {
             // e.g. 1 TiB / 10_000 ≈ 110 MiB → suggest the next power-of-two part size
-            let min_part = self.object_size.div_ceil(MAX_PARTS_PER_OBJECT);
+            let min_part = self.object_size_max.div_ceil(MAX_PARTS_PER_OBJECT);
             bail!(
                 "对象 {} ÷ part {} = {} 个 part,超出 S3 上限 {}。part 至少要 {}",
-                fmt_bytes(self.object_size),
+                fmt_bytes(self.object_size_max),
                 fmt_bytes(self.part_size),
                 parts,
                 MAX_PARTS_PER_OBJECT,
@@ -155,6 +174,21 @@ impl BenchConfig {
         Ok(())
     }
 
+    /// A random size for the next object. Real backup jobs do not emit
+    /// identically sized files; the budget is unaffected either way because
+    /// bytes-bought is fixed by price, not by how they are chunked.
+    pub fn sample_object_size(&self) -> u64 {
+        if self.object_size_min >= self.object_size_max {
+            return self.object_size_min;
+        }
+        rand::rng().random_range(self.object_size_min..=self.object_size_max)
+    }
+
+    /// Mid-point, for the estimate page which needs a single number.
+    pub fn object_size_avg(&self) -> u64 {
+        self.object_size_min + (self.object_size_max - self.object_size_min) / 2
+    }
+
     pub fn snapshot(&self) -> ConfigSnapshot {
         ConfigSnapshot {
             mode: self.mode,
@@ -163,7 +197,10 @@ impl BenchConfig {
             key_prefix: self.key_prefix.clone(),
             budget_micro: self.budget_micro,
             endpoint_url: self.endpoint_url.clone(),
-            object_size: self.object_size,
+            object_size_min: self.object_size_min,
+            object_size_max: self.object_size_max,
+            object_name: self.object_name.clone(),
+            object_ext: self.object_ext.clone(),
             part_size: self.part_size,
             rate_min: self.rate_min,
             rate_max: self.rate_max,
@@ -188,7 +225,14 @@ pub struct ConfigSnapshot {
     pub key_prefix: String,
     pub budget_micro: u64,
     pub endpoint_url: Option<String>,
-    pub object_size: u64,
+    /// Objects get a random size in [min, max] — real backup jobs do not emit
+    /// identically sized files, and the budget ledger does not care either way
+    /// (bytes bought is fixed by price, not by how they are chunked).
+    pub object_size_min: u64,
+    pub object_size_max: u64,
+    /// Base name and extension of every object written.
+    pub object_name: String,
+    pub object_ext: String,
     pub part_size: u64,
     pub rate_min: u64,
     pub rate_max: u64,
@@ -223,7 +267,18 @@ impl ConfigSnapshot {
             format!("{:?}", self.endpoint_url),
             format!("{:?}", other.endpoint_url),
         );
-        cmp("object_size", fmt_bytes(self.object_size), fmt_bytes(other.object_size));
+        cmp(
+            "object_size_min",
+            fmt_bytes(self.object_size_min),
+            fmt_bytes(other.object_size_min),
+        );
+        cmp(
+            "object_size_max",
+            fmt_bytes(self.object_size_max),
+            fmt_bytes(other.object_size_max),
+        );
+        cmp("object_name", self.object_name.clone(), other.object_name.clone());
+        cmp("object_ext", self.object_ext.clone(), other.object_ext.clone());
         cmp("part_size", fmt_bytes(self.part_size), fmt_bytes(other.part_size));
         cmp("rate_min", super::fmt_rate(self.rate_min), super::fmt_rate(other.rate_min));
         cmp("rate_max", super::fmt_rate(self.rate_max), super::fmt_rate(other.rate_max));
@@ -391,7 +446,10 @@ mod tests {
             path_style: false,
             insecure_skip_tls_verify: false,
             transfer_acceleration: false,
-            object_size: TIB,
+            object_size_min: GIB,
+            object_size_max: 10 * GIB,
+            object_name: "db-backup".into(),
+            object_ext: "tar.gz".into(),
             part_size: 256 * MIB,
             pool_size: 2 * GIB,
             concurrent_objects: 1,
@@ -418,12 +476,49 @@ mod tests {
         base().validate().unwrap();
     }
 
+    /// The part limit must be checked against the BIG end of the size range —
+    /// a range whose max blows the limit is unusable even if its min is fine.
     #[test]
     fn too_many_parts_rejected_with_suggestion() {
         let mut c = base();
+        c.object_size_max = TIB;
         c.part_size = 5 * MIB; // 1 TiB / 5 MiB ≫ 10_000
         let err = c.validate().unwrap_err().to_string();
         assert!(err.contains("10000"), "{}", err);
+    }
+
+    #[test]
+    fn inverted_size_range_is_rejected() {
+        let mut c = base();
+        c.object_size_min = 10 * GIB;
+        c.object_size_max = GIB;
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("min ≤ max"), "{}", err);
+    }
+
+    /// Sizes must vary — a fixed size is what made every object identical and
+    /// the console listing look machine-generated.
+    #[test]
+    fn sampled_sizes_stay_in_range_and_vary() {
+        let c = base(); // 1 GiB – 10 GiB
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..50 {
+            let s = c.sample_object_size();
+            assert!((GIB..=10 * GIB).contains(&s), "{} 越界", s);
+            seen.insert(s);
+        }
+        assert!(seen.len() > 40, "取样几乎不变化: {} 个不同值", seen.len());
+        assert_eq!(c.object_size_avg(), GIB + (10 * GIB - GIB) / 2);
+    }
+
+    /// A degenerate range is a fixed size, not an error.
+    #[test]
+    fn equal_bounds_give_a_fixed_size() {
+        let mut c = base();
+        c.object_size_min = 4 * GIB;
+        c.object_size_max = 4 * GIB;
+        c.validate().unwrap();
+        assert_eq!(c.sample_object_size(), 4 * GIB);
     }
 
     #[test]

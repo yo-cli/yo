@@ -71,6 +71,9 @@ pub async fn run(args: RunArgs) -> Result<()> {
         client: upload_s3,
         bucket: cfg.bucket.clone(),
         key_prefix: cfg.key_prefix.clone(),
+        object_name: cfg.object_name.clone(),
+        object_ext: cfg.object_ext.clone(),
+        started_at: ckpt.started_at,
         run_id,
         part_size: cfg.part_size,
         concurrent_parts: cfg.concurrent_parts,
@@ -85,7 +88,9 @@ pub async fn run(args: RunArgs) -> Result<()> {
 
     // Resume: abort orphan multipart uploads a hard-killed process left behind.
     if resumed && !cfg.dry_run {
-        match abort_orphans(&s3, &cfg.bucket, &uctx.run_prefix()).await {
+        // Scoped to the key prefix rather than a per-run directory: the
+        // single-instance lock means nothing else is uploading here.
+        match abort_orphans(&s3, &cfg.bucket, &cfg.key_prefix).await {
             Ok(0) => {}
             Ok(n) => println!("{} 已清理上次残留的 {} 个未完成分段上传", "✓".green(), n),
             Err(e) => eprintln!("{} 孤儿残片清理失败: {:#}", "⚠".yellow(), e),
@@ -179,16 +184,20 @@ pub async fn run(args: RunArgs) -> Result<()> {
                     break;
                 }
             }
-            let Some(size) = budget.plan_next_object(cfg.object_size) else {
+            let Some(size) = budget.plan_next_object(cfg.sample_object_size()) else {
                 break;
             };
             if matches!(cfg.rate_mode, RateMode::PerObject) {
                 let r = limiter.resample(cfg.rate_min, cfg.rate_max);
-                say(&pb, format!("🎲 obj-{:06} 本对象速率 {}", next_iteration, fmt_rate(r)));
+                say(&pb, format!("🎲 obj #{} 本对象速率 {}", next_iteration, fmt_rate(r)));
             }
             say(
                 &pb,
-                format!("⬆ 开始上传 obj-{:06}({})", next_iteration, fmt_bytes(size)),
+                format!(
+                    "⬆ 开始上传 {}({})",
+                    uctx.object_key(next_iteration),
+                    fmt_bytes(size)
+                ),
             );
             let mode = mode.clone();
             let uctx = uctx.clone();

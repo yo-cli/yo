@@ -231,7 +231,7 @@ pub fn print_estimate(cfg: &BenchConfig, pricing: &Pricing, mode: &dyn BurnMode,
     let dests = mode.destinations();
     if cost.budget_drives_stop() {
         let total_bytes = budget_bytes(budget, cost, pricing, cfg.part_size);
-        let n_objects = total_bytes.div_ceil(cfg.object_size);
+        let n_objects = total_bytes.div_ceil(cfg.object_size_avg().max(1));
         let n_requests = total_bytes.div_ceil(cfg.part_size) + n_objects * cost.requests_per_object;
         let requests = pricing.request_micro(n_requests);
         let avg_rate = (cfg.rate_min + cfg.rate_max) / 2;

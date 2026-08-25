@@ -31,6 +31,11 @@ pub struct UploadCtx {
     pub client: aws_sdk_s3::Client,
     pub bucket: String,
     pub key_prefix: String,
+    pub object_name: String,
+    pub object_ext: String,
+    /// The run's original start (from the checkpoint), so keys stay stable
+    /// across resumes.
+    pub started_at: chrono::DateTime<chrono::Utc>,
     pub run_id: Uuid,
     pub part_size: u64,
     pub concurrent_parts: usize,
@@ -45,15 +50,47 @@ pub struct UploadCtx {
 }
 
 impl UploadCtx {
+    /// `<prefix><YYYY>/<MM>/<DD>/<name>-<YYYYMMDD>-<HHMMSS>-<NNNNNN>.<ext>`
+    ///
+    /// The timestamp comes from the checkpoint's `started_at`, not from now, so
+    /// a resumed run keeps writing under the same date and run-time as its
+    /// first session instead of splitting into two groups.
+    ///
+    /// There is no per-run hex directory any more: its only consumer was the
+    /// resume-time orphan sweep, and the single-instance lock already
+    /// guarantees no other run is writing under this (bucket, prefix).
     pub fn object_key(&self, iteration: u64) -> String {
-        format!("{}obj-{:06}", self.run_prefix(), iteration)
+        object_key_for(
+            &self.key_prefix,
+            &self.object_name,
+            &self.object_ext,
+            self.started_at,
+            iteration,
+        )
     }
+}
 
-    /// Prefix shared by every object of this run (for orphan sweeps).
-    pub fn run_prefix(&self) -> String {
-        let run_hex = self.run_id.simple().to_string();
-        format!("{}{}/", self.key_prefix, &run_hex[..8])
-    }
+/// Split out from `UploadCtx` so the layout can be pinned by a unit test —
+/// it is the thing a user actually sees in the console listing.
+pub fn object_key_for(
+    key_prefix: &str,
+    name: &str,
+    ext: &str,
+    started_at: chrono::DateTime<chrono::Utc>,
+    iteration: u64,
+) -> String {
+    let ext = ext.trim_start_matches('.');
+    let dot = if ext.is_empty() { "" } else { "." };
+    format!(
+        "{}{}/{}-{}-{:06}{}{}",
+        key_prefix,
+        started_at.format("%Y/%m/%d"),
+        name,
+        started_at.format("%Y%m%d-%H%M%S"),
+        iteration,
+        dot,
+        ext
+    )
 }
 
 pub enum ObjectOutcome {
@@ -406,5 +443,55 @@ async fn abort_upload(ctx: &UploadCtx, key: &str, upload_id: &str) {
         // Keep it registered: the exit-path abort_all retries it; yo-s3
         // cleanup covers whatever still survives.
         Err(e) => tracing::warn!("abort {} 失败(退出时重试): {}", key, DisplayErrorContext(&e)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::object_key_for;
+    use chrono::TimeZone;
+
+    fn at(y: i32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc.with_ymd_and_hms(y, mo, d, h, mi, s).unwrap()
+    }
+
+    /// Keys must read like an ordinary backup job's output: a date-partitioned
+    /// path, then name + date + sequence. No tool branding, no random hex.
+    #[test]
+    fn key_reads_like_a_backup_artifact() {
+        let k = object_key_for("backup/", "db-backup", "tar.gz", at(2026, 8, 25, 4, 15, 30), 1);
+        assert_eq!(k, "backup/2026/08/25/db-backup-20260825-041530-000001.tar.gz");
+    }
+
+    /// The run's start time is part of the name, so two runs on the same day
+    /// never overwrite each other's objects.
+    #[test]
+    fn runs_on_the_same_day_do_not_collide() {
+        let a = object_key_for("backup/", "db", "bak", at(2026, 8, 25, 1, 0, 0), 7);
+        let b = object_key_for("backup/", "db", "bak", at(2026, 8, 25, 2, 0, 0), 7);
+        assert_ne!(a, b);
+        assert!(a.starts_with("backup/2026/08/25/") && b.starts_with("backup/2026/08/25/"));
+    }
+
+    /// A resumed run reuses the checkpoint's start time, so its keys continue
+    /// the same series rather than starting a second group.
+    #[test]
+    fn sequence_advances_within_one_run() {
+        let t = at(2026, 8, 25, 4, 15, 30);
+        assert_eq!(
+            object_key_for("backup/", "db-backup", "tar.gz", t, 0),
+            "backup/2026/08/25/db-backup-20260825-041530-000000.tar.gz"
+        );
+        assert_eq!(
+            object_key_for("backup/", "db-backup", "tar.gz", t, 123456),
+            "backup/2026/08/25/db-backup-20260825-041530-123456.tar.gz"
+        );
+    }
+
+    #[test]
+    fn extension_is_optional_and_a_leading_dot_is_tolerated() {
+        let t = at(2026, 1, 2, 3, 4, 5);
+        assert!(object_key_for("d/", "x", "", t, 1).ends_with("-000001"));
+        assert!(object_key_for("d/", "x", ".zip", t, 1).ends_with("-000001.zip"));
     }
 }

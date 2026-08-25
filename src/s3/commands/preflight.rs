@@ -22,7 +22,7 @@ use crate::s3::cost::{
 use crate::s3::lastrun::{self, LastRun};
 use crate::s3::lock::{self, Acquired, RunLock};
 use crate::s3::modes::{BurnMode, ModeCtx};
-use crate::s3::{accel, crr, fmt_bytes, fmt_usd, netpath};
+use crate::s3::{accel, crr, fmt_bytes, fmt_usd, netpath, sweep};
 
 /// Where a pre-`~/.yo/s3` version of the tool kept its checkpoint.
 const LEGACY_CHECKPOINT: &str = "./yo-s3.ckpt.json";
@@ -158,7 +158,10 @@ pub async fn prepare(args: RunArgs) -> Result<RunContext> {
         insecure_skip_tls_verify: args.insecure_skip_tls_verify,
         // Resolved below, once the bucket's region is known.
         transfer_acceleration: false,
-        object_size: args.object_size,
+        object_size_min: args.object_size_min,
+        object_size_max: args.object_size_max,
+        object_name: args.object_name.clone(),
+        object_ext: args.object_ext.clone(),
         part_size: args.part_size,
         pool_size: args.pool_size,
         concurrent_objects: args.concurrent_objects,
@@ -292,6 +295,42 @@ pub async fn prepare(args: RunArgs) -> Result<RunContext> {
             ))
         }
     };
+    // The default prefix is now a natural-looking `backup/`, which a real
+    // bucket may genuinely already use. Everything under it is treated as this
+    // tool's disposable data — the retention sweeper deletes it, `cleanup`
+    // deletes it. Say so before the first byte, not after.
+    let fresh_run = !Path::new(&cfg.checkpoint_path).exists();
+    if !cfg.dry_run && fresh_run {
+        if let Ok(existing) = sweep::count_remaining(&s3, &cfg.bucket, &cfg.key_prefix).await {
+            if existing.deleted > 0 {
+                println!(
+                    "{} 前缀 {} 下已有 {} 个对象({}),不是本次运行写的",
+                    "⚠".yellow().bold(),
+                    cfg.key_prefix.bold(),
+                    existing.deleted,
+                    fmt_bytes(existing.bytes)
+                );
+                println!(
+                    "  {}",
+                    format!(
+                        "保留期清扫与 yo-s3 cleanup 会把该前缀下的一切当作本工具的数据删掉 —— \
+                         真实数据请换一个 --key-prefix(当前 --retain {:?})",
+                        cfg.retain
+                    )
+                    .yellow()
+                );
+                if !cfg.yes {
+                    let go = inquire::Confirm::new("确认这个前缀下的东西可以被删除?")
+                        .with_default(false)
+                        .prompt()?;
+                    if !go {
+                        bail!("已取消:请换一个空的 --key-prefix");
+                    }
+                }
+            }
+        }
+    }
+
     let pricing_region = bucket_region
         .clone()
         .or_else(|| resolved_region(&shared))

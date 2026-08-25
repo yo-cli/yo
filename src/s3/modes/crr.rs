@@ -127,7 +127,10 @@ impl BurnMode for CrrMode {
 /// Empty = the run degrades to request fees.
 async fn resolve_dest(ctx: &ModeCtx<'_>) -> Result<Vec<DestTarget>> {
     let cfg = ctx.cfg;
-    let detected = match crr::detect(ctx.s3, &cfg.bucket).await {
+    // Only rules that actually match what we write generate traffic. Counting
+    // a rule scoped elsewhere would arm the cost model at K× for a burn that
+    // never happens — the run would write for hours and barely move the budget.
+    let detected = match crr::detect_covering(ctx.s3, &cfg.bucket, Some(&cfg.key_prefix)).await {
         Ok(d) => d,
         Err(e) => {
             if cfg.dry_run {
@@ -163,6 +166,7 @@ async fn resolve_dest(ctx: &ModeCtx<'_>) -> Result<Vec<DestTarget>> {
         }
         provision(ctx, &cfg.dest_regions).await?
     } else if cfg.dry_run || cfg.yes {
+        warn_prefix_mismatch(ctx).await;
         println!(
             "{} 未配置跨区复制(烧钱主引擎缺失)—— 加 {} 可自动配好再开烧",
             "⚠".yellow().bold(),
@@ -170,6 +174,7 @@ async fn resolve_dest(ctx: &ModeCtx<'_>) -> Result<Vec<DestTarget>> {
         );
         Vec::new()
     } else {
+        warn_prefix_mismatch(ctx).await;
         println!(
             "{} 未配置跨区复制 —— 它是烧钱主引擎(跨区流量 ~$0.02/GB,每多一个目标区域翻一倍)",
             "⚠".yellow().bold()
@@ -211,6 +216,25 @@ async fn resolve_dest(ctx: &ModeCtx<'_>) -> Result<Vec<DestTarget>> {
         });
     }
     Ok(targets)
+}
+
+/// The nastiest failure this tool can have: rules exist, so nothing looks
+/// broken, but none of them match the prefix we write — so no replication, no
+/// traffic fee, and a run that writes all day without moving the budget. Say it
+/// out loud rather than reporting a bland "未配置".
+async fn warn_prefix_mismatch(ctx: &ModeCtx<'_>) {
+    let all = crr::detect(ctx.s3, &ctx.cfg.bucket).await.unwrap_or_default();
+    if all.is_empty() {
+        return;
+    }
+    println!(
+        "{} 桶上有 {} 条复制规则,但没有一条覆盖前缀 {} —— \n  \
+         写进这个前缀的对象不会被复制,也就不产生跨区流量费,预算几乎不动。\n  \
+         要么把 --key-prefix 改成规则覆盖的前缀,要么删掉现有规则重新配置",
+        "⚠".yellow().bold(),
+        all.len(),
+        ctx.cfg.key_prefix.bold()
+    );
 }
 
 fn source_region(ctx: &ModeCtx<'_>) -> Result<String> {

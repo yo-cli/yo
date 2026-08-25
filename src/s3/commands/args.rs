@@ -24,8 +24,9 @@ pub struct RunArgs {
     #[arg(long)]
     pub bucket: Option<String>,
 
-    /// 对象 key 前缀(所有写入/清理只发生在该前缀下)
-    #[arg(long, default_value = "yo-s3-bench/")]
+    /// 对象 key 前缀。**它同时是清扫与 cleanup 的删除作用域** —— 该前缀下的
+    /// 所有对象都会被当作本工具产生的数据处理,别指向有真实数据的前缀
+    #[arg(long, default_value = "backup/")]
     pub key_prefix: String,
 
     /// 跨区复制目标区域,可重复或逗号分隔。桶还没配复制时,给了它就自动配好
@@ -43,10 +44,22 @@ pub struct RunArgs {
     #[arg(long)]
     pub profile: Option<String>,
 
-    /// 单对象大小。checkpoint 与预算记账都以「完成一个对象」为单位,
-    /// 所以它同时决定续跑粒度:越大越省请求(可忽略),越小越抗中断
-    #[arg(long, value_parser = parse_size, default_value = "100GiB")]
-    pub object_size: u64,
+    /// 单对象大小下限。每个对象在 [min, max] 内随机取,像真实备份那样不等大。
+    /// checkpoint 与预算记账都以「完成一个对象」为单位,所以它同时决定续跑粒度
+    #[arg(long, value_parser = parse_size, default_value = "1GiB")]
+    pub object_size_min: u64,
+
+    /// 单对象大小上限
+    #[arg(long, value_parser = parse_size, default_value = "10GiB")]
+    pub object_size_max: u64,
+
+    /// 对象基础名。最终 key 形如 <前缀><年>/<月>/<日>/<名字>-<日期>-<时刻>-<编号>.<扩展名>
+    #[arg(long, default_value = "db-backup")]
+    pub object_name: String,
+
+    /// 对象扩展名(不含点)
+    #[arg(long, default_value = "tar.gz")]
+    pub object_ext: String,
 
     /// multipart 分片大小
     #[arg(long, value_parser = parse_size, default_value = "256MiB")]
