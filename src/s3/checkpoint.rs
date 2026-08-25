@@ -2,6 +2,7 @@
 // after every completed object and on exit, so a crash never leaves a torn file.
 
 use anyhow::{bail, Context, Result};
+use colored::Colorize;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -82,15 +83,25 @@ impl Checkpoint {
         Ok(ckpt)
     }
 
-    /// Refuse to resume when the effective config differs from the snapshot —
-    /// silently continuing with different layout/target would corrupt the run.
+    /// Refuse to resume only when the data would move somewhere the retention
+    /// sweeper no longer looks — everything already written under the old
+    /// bucket/prefix would then bill storage forever with nothing collecting it.
+    ///
+    /// Everything else (pricing, object size, naming, budget) is reported and
+    /// allowed: `burned_micro` is a scalar that only accumulates, so none of it
+    /// can make the money already spent wrong.
     pub fn validate_config(&self, current: &ConfigSnapshot) -> Result<()> {
-        let diffs = self.config.diff(current);
-        if !diffs.is_empty() {
+        let diff = self.config.diff(current);
+        if !diff.blocking.is_empty() {
             bail!(
-                "配置与 checkpoint 快照不一致,拒绝续跑:\n  {}\n(想全新开始请删除 checkpoint 文件后重跑)",
-                diffs.join("\n  ")
+                "数据位置与 checkpoint 不一致,拒绝续跑:\n  {}\n\
+                 旧位置写下的对象会掉出清扫范围、永远计存储费。\n\
+                 想换位置请先 yo-s3 cleanup 清掉旧数据,再删除 checkpoint 重跑",
+                diff.blocking.join("\n  ")
             );
+        }
+        for note in &diff.notes {
+            println!("{} 续跑时改动: {}", "ℹ".blue(), note);
         }
         Ok(())
     }
@@ -155,13 +166,30 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
     }
 
+    /// Renaming, resizing, repricing — none of it can make already-burned
+    /// money wrong, so none of it may cost the user their ledger.
     #[test]
-    fn config_mismatch_is_rejected_with_diff() {
+    fn renaming_and_resizing_never_costs_the_ledger() {
         let ckpt = Checkpoint::new("run-1".into(), snapshot());
         let mut other = snapshot();
         other.part_size = 20 * MIB;
+        other.object_name = "totally-different".into();
+        other.object_ext = "zip".into();
+        other.object_size_min = 5 * MIB;
+        other.object_size_max = 5 * MIB;
+        other.budget_micro = 9_000_000;
+        ckpt.validate_config(&other).unwrap();
+    }
+
+    /// Moving the data is the one thing that is refused.
+    #[test]
+    fn moving_the_data_is_rejected_with_the_reason() {
+        let ckpt = Checkpoint::new("run-1".into(), snapshot());
+        let mut other = snapshot();
+        other.key_prefix = "elsewhere/".into();
         let err = ckpt.validate_config(&other).unwrap_err().to_string();
-        assert!(err.contains("part_size"), "{}", err);
+        assert!(err.contains("key_prefix"), "{}", err);
+        assert!(err.contains("存储费"), "要说清后果: {}", err);
     }
 
     /// Pace is NOT part of the snapshot: a run that turns out to be outrunning
@@ -197,14 +225,12 @@ mod tests {
         old.validate_config(&snapshot()).unwrap();
     }
 
-    /// What the snapshot still exists for: layout and accounting identity.
+    /// What the snapshot still exists for: where the data lives.
     #[test]
     fn layout_and_accounting_changes_still_block_resume() {
         let ckpt = Checkpoint::new("run-1".into(), snapshot());
         for (name, mutate) in [
             ("bucket", (|s: &mut ConfigSnapshot| s.bucket = "other".into()) as fn(&mut ConfigSnapshot)),
-            ("budget", |s: &mut ConfigSnapshot| s.budget_micro = 1),
-            ("object_name", |s: &mut ConfigSnapshot| s.object_name = "x".into()),
             ("key_prefix", |s: &mut ConfigSnapshot| s.key_prefix = "z/".into()),
         ] {
             let mut other = snapshot();

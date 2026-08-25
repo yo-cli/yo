@@ -207,8 +207,16 @@ impl BenchConfig {
     }
 }
 
-/// The subset of config that must not change across --resume: fields that
-/// affect where data goes, how it is laid out, or what "done" means.
+/// A copy of the config a run started with, kept so a resume can tell what
+/// changed.
+///
+/// **Almost nothing here blocks a resume.** The money is a scalar that only
+/// accumulates — `burned_micro` is bytes × price — so renaming objects, or
+/// resizing them, or repricing future bytes cannot make it wrong. The only
+/// change with a real consequence is moving WHERE the data lives: objects
+/// written under the old bucket/prefix fall outside what the retention sweeper
+/// and `cleanup` look at, and then bill storage forever with nothing coming
+/// back for them. That, and only that, refuses to resume.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConfigSnapshot {
     /// Absent in checkpoints written before modes existed — those runs were
@@ -222,13 +230,16 @@ pub struct ConfigSnapshot {
     pub key_prefix: String,
     pub budget_micro: u64,
     pub endpoint_url: Option<String>,
-    /// Objects get a random size in [min, max] — real backup jobs do not emit
-    /// identically sized files, and the budget ledger does not care either way
-    /// (bytes bought is fixed by price, not by how they are chunked).
+    /// Absent in checkpoints written before object size became a range and
+    /// before objects were named — zero / empty means "not recorded", which
+    /// `diff` reports as no change rather than as a change from nothing.
+    #[serde(default)]
     pub object_size_min: u64,
+    #[serde(default)]
     pub object_size_max: u64,
-    /// Base name and extension of every object written.
+    #[serde(default)]
     pub object_name: String,
+    #[serde(default)]
     pub object_ext: String,
     pub part_size: u64,
     // Rate is deliberately ABSENT. It is not "where data goes, how it is laid
@@ -240,9 +251,39 @@ pub struct ConfigSnapshot {
     pub retain_secs: u64,
 }
 
+/// What changed between the checkpoint's config and the current one.
+#[derive(Debug, Default)]
+pub struct SnapshotDiff {
+    /// Moves the data somewhere the sweeper no longer looks. Refuses resume.
+    pub blocking: Vec<String>,
+    /// Changes what future bytes cost or look like. Reported, then allowed.
+    pub notes: Vec<String>,
+}
+
+impl SnapshotDiff {
+    pub fn is_clean(&self) -> bool {
+        self.blocking.is_empty() && self.notes.is_empty()
+    }
+}
+
 impl ConfigSnapshot {
-    /// Field-by-field diff for the resume mismatch error.
-    pub fn diff(&self, other: &ConfigSnapshot) -> Vec<String> {
+    /// Field-by-field diff, split by whether it can actually break the run.
+    pub fn diff(&self, other: &ConfigSnapshot) -> SnapshotDiff {
+        let mut out = SnapshotDiff::default();
+        let mut blocking = |name: &str, a: String, b: String| {
+            if a != b {
+                out.blocking
+                    .push(format!("{}: checkpoint={} 当前={}", name, a, b));
+            }
+        };
+        blocking("bucket", self.bucket.clone(), other.bucket.clone());
+        blocking("key_prefix", self.key_prefix.clone(), other.key_prefix.clone());
+        blocking(
+            "endpoint_url",
+            format!("{:?}", self.endpoint_url),
+            format!("{:?}", other.endpoint_url),
+        );
+
         let mut d = Vec::new();
         let mut cmp = |name: &str, a: String, b: String| {
             if a != b {
@@ -255,37 +296,42 @@ impl ConfigSnapshot {
             self.transfer_acceleration.to_string(),
             other.transfer_acceleration.to_string(),
         );
-        cmp("bucket", self.bucket.clone(), other.bucket.clone());
-        cmp("key_prefix", self.key_prefix.clone(), other.key_prefix.clone());
         cmp(
             "budget",
             super::fmt_usd(self.budget_micro),
             super::fmt_usd(other.budget_micro),
         );
-        cmp(
-            "endpoint_url",
-            format!("{:?}", self.endpoint_url),
-            format!("{:?}", other.endpoint_url),
-        );
-        cmp(
-            "object_size_min",
-            fmt_bytes(self.object_size_min),
-            fmt_bytes(other.object_size_min),
-        );
-        cmp(
-            "object_size_max",
-            fmt_bytes(self.object_size_max),
-            fmt_bytes(other.object_size_max),
-        );
-        cmp("object_name", self.object_name.clone(), other.object_name.clone());
-        cmp("object_ext", self.object_ext.clone(), other.object_ext.clone());
+        // Zero / empty means the checkpoint predates the field, not that the
+        // value was zero — reporting "checkpoint=0 B 当前=1.00 GiB" would read
+        // like a defect rather than like an older file.
+        if self.object_size_min != 0 {
+            cmp(
+                "object_size_min",
+                fmt_bytes(self.object_size_min),
+                fmt_bytes(other.object_size_min),
+            );
+        }
+        if self.object_size_max != 0 {
+            cmp(
+                "object_size_max",
+                fmt_bytes(self.object_size_max),
+                fmt_bytes(other.object_size_max),
+            );
+        }
+        if !self.object_name.is_empty() {
+            cmp("object_name", self.object_name.clone(), other.object_name.clone());
+        }
+        if !self.object_ext.is_empty() {
+            cmp("object_ext", self.object_ext.clone(), other.object_ext.clone());
+        }
         cmp("part_size", fmt_bytes(self.part_size), fmt_bytes(other.part_size));
         cmp(
             "retain",
             format!("{}s", self.retain_secs),
             format!("{}s", other.retain_secs),
         );
-        d
+        out.notes = d;
+        out
     }
 }
 
@@ -533,14 +579,35 @@ mod tests {
         assert_eq!(parse_duration("30s").unwrap(), Duration::from_secs(30));
     }
 
+    /// Changing what future bytes cost or look like is reported, not refused —
+    /// none of it can make the money already burned wrong.
     #[test]
-    fn snapshot_diff_lists_changed_fields() {
+    fn pricing_and_layout_changes_are_notes_not_blockers() {
         let a = base().snapshot();
         let mut c = base();
         c.part_size = 512 * MIB;
         c.budget_micro = 100_000_000;
+        c.object_name = "other".into();
+        c.object_size_max = 20 * GIB;
         let d = a.diff(&c.snapshot());
-        assert_eq!(d.len(), 2);
+        assert!(d.blocking.is_empty(), "不该拦: {:?}", d.blocking);
+        assert_eq!(d.notes.len(), 4, "{:?}", d.notes);
+    }
+
+    /// Moving the data IS refused: objects under the old prefix would fall out
+    /// of the retention sweeper's scope and bill storage forever.
+    #[test]
+    fn moving_the_data_blocks_resume() {
+        let a = base().snapshot();
+        for mutate in [
+            (|c: &mut BenchConfig| c.bucket = "other".into()) as fn(&mut BenchConfig),
+            |c: &mut BenchConfig| c.key_prefix = "elsewhere/".into(),
+            |c: &mut BenchConfig| c.endpoint_url = Some("http://minio:9000".into()),
+        ] {
+            let mut c = base();
+            mutate(&mut c);
+            assert_eq!(a.diff(&c.snapshot()).blocking.len(), 1);
+        }
     }
 
     /// Acceleration defaults to auto, never to a forced on/off — forcing it on
@@ -551,16 +618,17 @@ mod tests {
         assert_eq!(AccelMode::default(), AccelMode::Auto);
     }
 
+    /// TA changes what future bytes cost. Already-burned money stays valid —
+    /// it was real money at the price in force when it was spent.
     #[test]
-    fn toggling_acceleration_blocks_resume() {
-        // TA changes the per-byte rate; burned_micro from the other setting
-        // would be accounted at the wrong price.
+    fn toggling_acceleration_is_reported_not_refused() {
         let a = base().snapshot();
         let mut c = base();
         c.transfer_acceleration = true;
         let d = a.diff(&c.snapshot());
-        assert_eq!(d.len(), 1);
-        assert!(d[0].contains("transfer_acceleration"), "{:?}", d);
+        assert!(d.blocking.is_empty());
+        assert_eq!(d.notes.len(), 1);
+        assert!(d.notes[0].contains("transfer_acceleration"), "{:?}", d.notes);
     }
 
     /// The whole point of `--duration`: the estimate derives wall time from
@@ -644,14 +712,12 @@ mod tests {
     }
 
     #[test]
-    fn switching_mode_blocks_resume() {
-        // Different engine = different cost accounting; burned_micro from the
-        // old mode would be meaningless. Must surface as a diff, not silence.
+    fn switching_mode_is_reported_not_refused() {
         let a = base().snapshot();
         let mut c = base();
         c.mode = ModeId::WriteOnly;
         let d = a.diff(&c.snapshot());
-        assert_eq!(d.len(), 1);
-        assert!(d[0].contains("mode"), "{:?}", d);
+        assert!(d.blocking.is_empty());
+        assert!(d.notes[0].contains("mode"), "{:?}", d.notes);
     }
 }
