@@ -96,8 +96,22 @@ pub fn spawn_reporter(
             last_tick = Instant::now();
 
             let burned = budget.burned_micro();
+            // In-flight is shown but never added to the bar position: the bar
+            // tracks money actually committed, and a reservation can still be
+            // released by an abort.
+            let inflight = budget.reserved_micro();
+            let inflight_txt = if inflight > 0 {
+                format!("(在途 {})", fmt_usd(inflight))
+            } else {
+                String::new()
+            };
             pb.set_position((burned / 10_000).min(budget_total / 10_000));
-            pb.set_message(format!("{} / {}", fmt_usd(burned), fmt_usd(budget_total)));
+            pb.set_message(format!(
+                "{}{} / {}",
+                fmt_usd(burned),
+                inflight_txt,
+                fmt_usd(budget_total)
+            ));
 
             let mut backlog_txt = String::new();
             if !dry_run {
@@ -131,10 +145,11 @@ pub fn spawn_reporter(
             say(
                 &pb,
                 format!(
-                    "📊 瞬时 {} | 目标 {} | 已烧 {}/{}({:.1}%) | 对象 {} 完成 | SlowDown {}{}{}",
+                    "📊 瞬时 {} | 目标 {} | 已烧 {}{}/{}({:.1}%) | 对象 {} 完成 | SlowDown {}{}{}",
                     fmt_rate(inst),
                     fmt_rate(limiter.rate()),
                     fmt_usd(burned),
+                    inflight_txt,
                     fmt_usd(budget_total),
                     burned as f64 / budget_total as f64 * 100.0,
                     metrics.objects_done.load(Ordering::Relaxed),

@@ -43,8 +43,9 @@ pub struct RunArgs {
     #[arg(long)]
     pub profile: Option<String>,
 
-    /// 单对象大小
-    #[arg(long, value_parser = parse_size, default_value = "1TiB")]
+    /// 单对象大小。checkpoint 与预算记账都以「完成一个对象」为单位,
+    /// 所以它同时决定续跑粒度:越大越省请求(可忽略),越小越抗中断
+    #[arg(long, value_parser = parse_size, default_value = "100GiB")]
     pub object_size: u64,
 
     /// multipart 分片大小

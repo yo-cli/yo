@@ -67,6 +67,14 @@ impl BudgetMeter {
         self.burned_micro.load(Ordering::Relaxed)
     }
 
+    /// Money committed by objects still uploading. Transfer fees only land when
+    /// an object completes (CRR never replicates a partial upload), so with
+    /// large objects `burned_micro` can sit at zero for a long while — this is
+    /// the number that shows the run is in fact spending.
+    pub fn reserved_micro(&self) -> u64 {
+        self.reserved_micro.load(Ordering::Relaxed)
+    }
+
     pub fn request_micro(&self) -> u64 {
         self.request_micro.load(Ordering::Relaxed)
     }
@@ -250,6 +258,23 @@ mod tests {
             let ratio = total_bytes as f64 / expected as f64;
             assert!((0.85..=1.15).contains(&ratio), "k={} 写入量偏离: {}", k, ratio);
         }
+    }
+
+    /// What the report line leans on: with objects big enough to take an hour,
+    /// `burned_micro` stays at zero the whole time and the reservation is the
+    /// only evidence the run is spending anything.
+    #[test]
+    fn reservation_is_visible_while_an_object_is_in_flight() {
+        let meter = BudgetMeter::new(1_000_000, 0, pricing(), crr_cost(), GIB);
+        assert_eq!(meter.reserved_micro(), 0);
+
+        let size = meter.plan_next_object(10 * GIB).unwrap();
+        assert!(meter.reserved_micro() > 0, "在途金额应可见");
+        assert_eq!(meter.burned_micro(), 0, "对象未完成前不记流量费");
+
+        meter.commit_object(size);
+        assert_eq!(meter.reserved_micro(), 0, "完成后预留应释放");
+        assert!(meter.burned_micro() > 0);
     }
 
     #[test]
