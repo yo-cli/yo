@@ -22,7 +22,7 @@ use crate::s3::cost::{
     self, path_surcharges, pricing_for, print_estimate, write_lifecycle_files, CostModel, Pricing,
 };
 use crate::s3::lastrun::{self, LastRun};
-use crate::s3::lock::{self, Acquired, RunLock};
+use crate::s3::lock::{self, Acquired, HolderInfo, RunLock};
 use crate::s3::modes::{BurnMode, ModeCtx};
 use crate::s3::quota;
 use crate::s3::{accel, crr, fmt_bytes, fmt_usd, naming, netpath, sweep};
@@ -157,7 +157,7 @@ pub async fn prepare(args: RunArgs) -> Result<RunContext> {
     }
 
     // --- 1.5 state directory: checkpoint + summary + the lock all live here ---
-    let state = config::state_dir(
+    let mut state = config::state_dir(
         endpoint_url.as_deref(),
         &bucket,
         &args.key_prefix,
@@ -213,22 +213,51 @@ pub async fn prepare(args: RunArgs) -> Result<RunContext> {
     // The lock is taken before the first AWS call on purpose: a second instance
     // must be turned away before it can enable acceleration on the bucket or
     // create replication destinations, let alone spend.
-    config::ensure_state_dir(&state)?;
-    let run_lock = match lock::try_acquire(&state, "yo-s3 run")? {
-        Acquired::Held(l) => l,
-        Acquired::Busy(holder) => bail!(
-            "已有 {} 在跑,拒绝启动第二个实例。\n  \
-             两个实例各记各的账,{} 的硬上限会被花掉两遍。\n  \
-             确认它已结束后重试;真要并行请换一个 --key-prefix(各自独立的预算与清扫范围)",
-            holder,
-            fmt_usd(cfg.budget_micro)
-        ),
+    let run_lock = loop {
+        config::ensure_state_dir(&state)?;
+        match lock::try_acquire(&state, "yo-s3 run")? {
+            Acquired::Held(l) => break l,
+            Acquired::Busy(holder) => {
+                // Not a dead end: a different prefix is a different ledger, and
+                // asking beats making the user re-type the whole command.
+                cfg.key_prefix = prompt_parallel_prefix(&holder, &cfg, &args)?;
+                state = config::state_dir(
+                    endpoint_url.as_deref(),
+                    &cfg.bucket,
+                    &cfg.key_prefix,
+                    args.dry_run,
+                )?;
+                cfg.checkpoint_path = resolve_checkpoint(
+                    args.checkpoint.as_deref(),
+                    args.resume.as_deref(),
+                    &state,
+                    args.dry_run,
+                );
+                cfg.summary_out = args
+                    .summary_out
+                    .clone()
+                    .unwrap_or_else(|| path_string(state.join("summary.json")));
+                cfg.validate()?;
+            }
+        }
     };
     println!(
         "{} 单实例锁已获取: {}(仅防本机重复启动;多台机器打同一桶+前缀仍会各花各的预算)",
         "✓".green(),
         state.display()
     );
+    if cfg.key_prefix != args.key_prefix {
+        // The prefix is now something the user did not type, and every later
+        // command that touches this run's data needs it spelled out.
+        println!(
+            "  {}",
+            format!(
+                "本次前缀 {}(独立账本);清理用 yo-s3 cleanup --bucket {} --key-prefix {}",
+                cfg.key_prefix, cfg.bucket, cfg.key_prefix
+            )
+            .dimmed()
+        );
+    }
 
     // --- 2. credentials + clients ---
     // Credentials are as required as --budget and --bucket, and are the most
@@ -713,6 +742,101 @@ fn pick_generated_bucket() -> Result<String> {
     }
 }
 
+/// Another instance holds this state directory's lock. Refusing outright is
+/// right about the danger and wrong about the answer: a run under a DIFFERENT
+/// key prefix gets its own ledger, its own sweep scope and its own lock — it is
+/// exactly the parallel run the refusal used to tell the user to go type by
+/// hand. So offer it here, while saying plainly that it is a SECOND budget and
+/// not a share of the first.
+///
+/// Three cases still just fail. `--yes`, because a cron waking up while
+/// yesterday's run is still going must never quietly start burning another full
+/// budget; and `--resume` / `--checkpoint`, because both pin the ledger to one
+/// file — a parallel run writing that same file is the accounting corruption
+/// the lock exists to prevent.
+fn prompt_parallel_prefix(holder: &HolderInfo, cfg: &BenchConfig, args: &RunArgs) -> Result<String> {
+    if cfg.yes || args.resume.is_some() || args.checkpoint.is_some() {
+        bail!(
+            "已有 {} 在跑,拒绝启动第二个实例。\n  \
+             两个实例各记各的账,{} 的硬上限会被花掉两遍。\n  \
+             确认它已结束后重试;真要并行请换一个 --key-prefix(各自独立的预算与清扫范围)",
+            holder,
+            fmt_usd(cfg.budget_micro)
+        );
+    }
+    println!("{} 已有 {} 在跑", "⚠".yellow().bold(), holder);
+    println!(
+        "  {}{}{}",
+        "两个实例各记各的账:另起一个是再花一份 ".yellow(),
+        fmt_usd(cfg.budget_micro).yellow().bold(),
+        ",不是两个进程分同一份".yellow()
+    );
+    let suggested = next_free_prefix(cfg, args.dry_run)?;
+    let parallel = format!("另起一个并行跑,前缀 {}", suggested);
+    const CUSTOM: &str = "另起一个,自己指定前缀";
+    const QUIT: &str = "退出,等它跑完";
+    let choice = inquire::Select::new(
+        "怎么办?",
+        vec![parallel, CUSTOM.to_string(), QUIT.to_string()],
+    )
+    .with_help_message("换前缀 = 换一本账:预算、checkpoint、保留期清扫范围各自独立,互不删对方的数据")
+    .prompt()?;
+    if choice == QUIT {
+        bail!("已取消:等它结束后重试");
+    }
+    if choice == CUSTOM {
+        let typed = inquire::Text::new("新的 --key-prefix?")
+            .with_default(&suggested)
+            .prompt()?;
+        let typed = typed.trim().trim_start_matches('/');
+        // A prefix is a delete scope: an empty one would put the whole bucket
+        // in reach of the retention sweeper, which a stray Enter must not do.
+        if typed.is_empty() {
+            return Ok(suggested);
+        }
+        if typed.ends_with('/') {
+            return Ok(typed.to_string());
+        }
+        return Ok(format!("{}/", typed));
+    }
+    Ok(suggested)
+}
+
+/// The first `<base>-N/` with no state directory yet — a prefix nobody keeps an
+/// account under, so the parallel run starts from zero instead of adopting
+/// somebody else's stale checkpoint.
+fn next_free_prefix(cfg: &BenchConfig, dry_run: bool) -> Result<String> {
+    let base = prefix_base(&cfg.key_prefix);
+    for n in 2..100 {
+        let candidate = format!("{}-{}/", base, n);
+        let dir = config::state_dir(cfg.endpoint_url.as_deref(), &cfg.bucket, &candidate, dry_run)?;
+        if !dir.exists() {
+            return Ok(candidate);
+        }
+    }
+    bail!("{}-2/ 到 {}-99/ 都已有账本,请显式给一个 --key-prefix", base, base)
+}
+
+/// The stem a parallel prefix counts up from. `backup/` and `backup-2/` both
+/// count from `backup`, so the third run lands on `backup-3/` rather than
+/// growing a `backup-2-2/` tail one suffix per parallel run.
+fn prefix_base(key_prefix: &str) -> &str {
+    let stem = key_prefix.trim_end_matches('/');
+    let base = match stem.rsplit_once('-') {
+        Some((head, n))
+            if !head.is_empty() && !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            head
+        }
+        _ => stem,
+    };
+    if base.is_empty() {
+        "backup"
+    } else {
+        base
+    }
+}
+
 /// An explicit `--checkpoint` wins. Otherwise the state directory — except
 /// when an older version left a checkpoint in the working directory: adopting
 /// it keeps a multi-day run resumable instead of silently restarting from zero,
@@ -849,5 +973,25 @@ async fn resolve_acceleration(
             eprintln!("{} 传输加速状态读取失败({:#}),本次不启用", "⚠".yellow(), e);
             Ok(false)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::prefix_base;
+
+    /// However many parallel runs are started, they all count up from the same
+    /// stem — otherwise each one would grow another `-2` on the last one's name.
+    #[test]
+    fn parallel_prefixes_count_from_one_stem() {
+        assert_eq!(prefix_base("backup/"), "backup");
+        assert_eq!(prefix_base("backup-2/"), "backup");
+        assert_eq!(prefix_base("backup-17/"), "backup");
+        // A hyphen that is not a counter belongs to the name.
+        assert_eq!(prefix_base("db-backup/"), "db-backup");
+        assert_eq!(prefix_base("nightly/db/"), "nightly/db");
+        // An empty prefix would count up from nothing, so it gets a name.
+        assert_eq!(prefix_base(""), "backup");
+        assert_eq!(prefix_base("/"), "backup");
     }
 }
