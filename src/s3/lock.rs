@@ -80,7 +80,7 @@ impl fmt::Display for HolderInfo {
     }
 }
 
-/// yo-s3 only runs on Linux (specs/yo_s3.md §11). This stub exists so `yo_lib`
+/// yo-s3 only runs on Linux. This stub exists so `yo_lib`
 /// still builds for the Windows `yo-git` target, where no burn ever runs.
 #[cfg(not(unix))]
 pub fn try_acquire(_dir: &Path, _cmd: &str) -> Result<Acquired> {

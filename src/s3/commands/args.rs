@@ -20,7 +20,7 @@ pub struct RunArgs {
     #[arg(long, value_parser = parse_usd)]
     pub budget: Option<u64>,
 
-    /// 目标 S3 桶。省略时交互询问
+    /// 目标 S3 桶。省略时交互询问,留空回车则从候选名里挑一个;桶不存在会自动创建
     #[arg(long)]
     pub bucket: Option<String>,
 

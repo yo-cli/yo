@@ -19,6 +19,7 @@ pub mod limiter;
 pub mod lock;
 pub mod metrics;
 pub mod modes;
+pub mod naming;
 pub mod netpath;
 pub mod pool;
 pub mod quota;

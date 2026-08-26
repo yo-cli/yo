@@ -1,6 +1,6 @@
 # yo-ob 产品需求规格
 
-> 本文档面向 AI 开发助手，描述 yo-ob 的产品定位、核心场景和设计决策。
+> 只写代码说不出来的东西：定位、设计取舍、做不到的。命令行为看 `yo-ob --help` 与 `src/ob/`。
 
 ---
 
@@ -14,47 +14,7 @@
 
 ---
 
-## 2. 核心场景
-
-### 2.1 一键准备环境
-
-**需求：** 用户拿到一台新的 Debian 服务器，要部署 OceanBase，不想一项项查文档手动配置。
-
-**行为：**
-- 用户运行 `yo-ob prepare`
-- 系统检查：
-  - 是否为 Debian 系统
-  - 是否以 root 权限运行
-- 交互式配置 SSH 端口（可选择修改或保持默认）
-- 配置 `/etc/hosts` 文件（确保 `127.0.0.1 {hostname}` 存在）
-- 检查并安装必要软件包（`iputils-clockdiff`、`rpm2cpio`、`alien`）
-- 配置 OceanBase 资源限制（`/etc/security/limits.d/99-oceanbase.conf`）：
-  - nofile=655360、nproc=655360、core=unlimited、stack=unlimited
-- 配置内核参数（`/etc/sysctl.d/99-oceanbase.conf`）：
-  - `fs.aio-max-nr=1048576`、`vm.max_map_count=655360`
-- 禁用 IPv6（`/etc/sysctl.d/99-disable-ipv6.conf`）
-- 应用 sysctl 配置并验证运行时值
-
-**冲突处理：**
-- 如果配置文件已存在且内容不同，交互式提示用户选择：覆盖还是保留
-- `--force` 标志跳过确认，直接覆盖
-- 修改前自动备份原文件（带时间戳）
-
-### 2.2 环境检查
-
-**需求：** 用户已经配过环境（或者不确定配没配），想验证所有配置是否正确。
-
-**行为：**
-- 用户运行 `yo-ob check`
-- 逐项检查：
-  - 配置文件是否存在、内容是否正确
-  - sysctl 运行时值是否与配置一致
-  - 当前 session 的 ulimit 值是否满足要求（nofile、core、stack、nproc）
-- 用清晰的表格展示每一项的状态（通过/不通过/冲突）
-
----
-
-## 3. 设计决策
+## 2. 设计决策
 
 | 决策 | 理由 |
 |------|------|
@@ -67,7 +27,7 @@
 
 ---
 
-## 4. 当前已知限制
+## 3. 当前已知限制
 
 - **仅 Debian Linux：** 不支持 CentOS、Ubuntu 或其他发行版
 - **不管理 OceanBase 本身：** 只做环境准备，不负责 OceanBase 的安装和启动

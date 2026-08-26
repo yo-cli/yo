@@ -25,7 +25,7 @@ use crate::s3::lastrun::{self, LastRun};
 use crate::s3::lock::{self, Acquired, RunLock};
 use crate::s3::modes::{BurnMode, ModeCtx};
 use crate::s3::quota;
-use crate::s3::{accel, crr, fmt_bytes, fmt_usd, netpath, sweep};
+use crate::s3::{accel, crr, fmt_bytes, fmt_usd, naming, netpath, sweep};
 
 /// Where a pre-`~/.yo/s3` version of the tool kept its checkpoint.
 const LEGACY_CHECKPOINT: &str = "./yo-s3.ckpt.json";
@@ -91,13 +91,7 @@ pub async fn prepare(args: RunArgs) -> Result<RunContext> {
     let bucket = match args.bucket.clone() {
         Some(b) => b,
         None if args.yes => bail!("--yes 模式下必须显式提供 --bucket"),
-        None => {
-            let mut prompt = inquire::Text::new("目标 S3 桶名称?");
-            if let Some(b) = last.bucket.as_deref() {
-                prompt = prompt.with_default(b);
-            }
-            prompt.prompt()?
-        }
+        None => prompt_bucket(last.bucket.as_deref())?,
     };
 
     // Params with no documented default fall back to last time. Explicit flags
@@ -432,7 +426,7 @@ pub async fn prepare(args: RunArgs) -> Result<RunContext> {
     // Done here and not at config time because the byte count depends on the
     // composed cost model, which only exists once the mode is armed.
     // `--days` plans the same way `--duration` does; what it adds on top is the
-    // hard per-day ceiling, which lives in the budget meter (see §5.6e).
+    // hard per-day ceiling, which lives in the budget meter (`quota.rs`).
     // Carrying the flag text alongside the target keeps the two from being
     // re-derived apart: whichever flag set the wall time is the one every
     // message about it should name.
@@ -672,6 +666,51 @@ fn prompt_days(budget_micro: u64, last_days: Option<u64>) -> Result<Option<u64>>
         .dimmed()
     );
     Ok(Some(days))
+}
+
+/// Ask which bucket to fill. An empty answer is not a mistake worth ending the
+/// run over: a missing bucket gets created a few steps below anyway, so the tool
+/// can just as well invent the name — nobody wants to sit at a prompt naming a
+/// disposable burn bucket, and having no bucket yet is what a first run IS.
+fn prompt_bucket(last: Option<&str>) -> Result<String> {
+    let mut prompt = inquire::Text::new("目标 S3 桶名称?");
+    prompt = match last {
+        Some(b) => prompt.with_default(b),
+        None => prompt.with_help_message("留空回车 = 从随机候选名里挑一个(桶不存在会自动创建)"),
+    };
+    let answer = prompt.prompt()?;
+    if !answer.trim().is_empty() {
+        return Ok(answer.trim().to_string());
+    }
+    pick_generated_bucket()
+}
+
+/// Pick from a batch of invented names, re-rolling until one is liked. Nothing
+/// here can end the run: an empty answer at the manual entry lands back on the
+/// batch, which is the whole point of this path existing.
+fn pick_generated_bucket() -> Result<String> {
+    const BATCH: usize = 5;
+    const REROLL: &str = "换一批";
+    const MANUAL: &str = "自己输入";
+    loop {
+        let mut options = naming::suggest_bucket_names(BATCH);
+        options.push(REROLL.to_string());
+        options.push(MANUAL.to_string());
+        let choice = inquire::Select::new("挑一个桶名?", options)
+            .with_help_message("随机生成,几乎不可能与他人重名;选中后不存在即创建")
+            .prompt()?;
+        if choice == REROLL {
+            continue;
+        }
+        if choice == MANUAL {
+            let typed = inquire::Text::new("目标 S3 桶名称?").prompt()?;
+            if !typed.trim().is_empty() {
+                return Ok(typed.trim().to_string());
+            }
+            continue;
+        }
+        return Ok(choice);
+    }
 }
 
 /// An explicit `--checkpoint` wins. Otherwise the state directory — except
