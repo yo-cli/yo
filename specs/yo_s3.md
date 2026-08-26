@@ -603,7 +603,13 @@ src/s3/
   metrics.rs                     # 原子计数、hdr 直方图、最终 JSON 摘要结构
   budget.rs                      # 实时成本累加器（µ$ 原子记账、尾对象精确缩小,含单元测试）
   cost.rs                        # 区域价格表、CostModel、成本预估页、lifecycle JSON（含单元测试）
-  crr.rs                         # 跨区复制的 AWS API 层：检测 / 一键配置 / 复制积压采样
+  crr/                           # 跨区复制的 AWS API 层。按「对账号做了什么」分文件，
+    mod.rs                       #   因为需要保持一致的恰恰是这几件事之间的关系
+    identity.rs                  # 哪个桶是我们的：目标桶名派生/反解析 + created 标签（含单元测试）
+    role.rs                      # 复制 IAM 角色的完整生命周期：命名 / 创建 / 删除（含单元测试）
+    detect.rs                    # 只读现状：复制规则覆盖判定 / 版本控制 / 复制积压（含单元测试）
+    setup.rs                     # 建立扇出：区域校验 / 建桶 / 写规则，全程幂等（含单元测试）
+    teardown.rs                  # 拆除 + ListBuckets 孤儿反查
   accel.rs                       # 传输加速：状态检测 / 开启 / 硬约束校验（含单元测试）
   netpath.rs                     # 出网路径自动探测：IMDS + 路由表 + S3 endpoint（含单元测试）
   modes/
