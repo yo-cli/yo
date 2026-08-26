@@ -77,17 +77,50 @@ pub async fn run(args: CleanupArgs) -> Result<()> {
     // of the data billing storage in that region forever.
     let mut dest_targets: Vec<(aws_sdk_s3::Client, String)> = Vec::new();
     if args.endpoint_url.is_none() {
-        if let Ok(dest_buckets) = crr::detect(&s3, &bucket).await {
-            for dest_bucket in dest_buckets {
-                let dest_region = discover_bucket_region(&s3, &dest_bucket)
-                    .await
-                    .map(|p| p.region())
-                    .unwrap_or(None);
-                let dest_client =
-                    build_s3_client(&shared, &ClientOpts::default(), dest_region.as_deref())?;
-                println!("{} 检测到复制目标桶 {},一并清理", "ℹ".blue(), dest_bucket);
-                dest_targets.push((dest_client, dest_bucket));
-            }
+        let detected = crr::detect(&s3, &bucket).await;
+        for dest_bucket in detected.as_deref().unwrap_or_default() {
+            let dest_region = discover_bucket_region(&s3, dest_bucket)
+                .await
+                .map(|p| p.region())
+                .unwrap_or(None);
+            let dest_client =
+                build_s3_client(&shared, &ClientOpts::default(), dest_region.as_deref())?;
+            println!("{} 检测到复制目标桶 {},一并清理", "ℹ".blue(), dest_bucket);
+            dest_targets.push((dest_client, dest_bucket.clone()));
+        }
+
+        // The rules are not the only record of what was created. A teardown that
+        // deleted them but failed on a bucket leaves that bucket billing storage
+        // with nothing left pointing at it — and since destination regions are
+        // drawn at random, its name can no longer be guessed. Ask the account.
+        //
+        // But the whole classification is "no rule points here", which means
+        // nothing when the rules could not be read: an unreadable config would
+        // make every live destination look abandoned and get reported as one.
+        match &detected {
+            Err(e) => eprintln!(
+                "{} 复制配置不可读,跳过遗留目标桶反查(读不出规则就分不清在用与遗留): {:#}",
+                "⚠".yellow(),
+                e
+            ),
+            Ok(known) => match crr::find_orphan_dests(&shared, &s3, &bucket, known).await {
+                Ok(orphans) => {
+                    for orphan in orphans {
+                        let dest_client =
+                            build_s3_client(&shared, &ClientOpts::default(), Some(&orphan.region))?;
+                        println!(
+                            "{} 发现遗留目标桶 {}({},已无复制规则指向它),一并清理",
+                            "⚠".yellow(),
+                            orphan.bucket.bold(),
+                            orphan.region
+                        );
+                        dest_targets.push((dest_client, orphan.bucket));
+                    }
+                }
+                // Discovery is a bonus pass — losing it must not stop the
+                // cleanup the user actually asked for.
+                Err(e) => eprintln!("{} 遗留目标桶探测失败,已跳过: {:#}", "⚠".yellow(), e),
+            },
         }
     }
     let targets: Vec<(aws_sdk_s3::Client, String)> = std::iter::once((s3.clone(), bucket.clone()))

@@ -131,6 +131,33 @@ async fn ensure_versioning(client: &aws_sdk_s3::Client, bucket: &str) -> Result<
     Ok(())
 }
 
+/// The gate a fan-out must pass before anything is created — and, just as
+/// importantly, before a `--dry-run` bills it. Same-region replication produces
+/// no cross-region traffic and a repeated region is billed once, so either would
+/// make the cost model promise a burn AWS will never charge for.
+///
+/// `source_region` is optional because a rehearsal may not have been able to
+/// determine it; the duplicate check still applies.
+pub fn validate_dest_regions(source_region: Option<&str>, dest_regions: &[String]) -> Result<()> {
+    if dest_regions.is_empty() {
+        bail!("至少要指定一个复制目标区域");
+    }
+    let mut seen: Vec<&str> = Vec::new();
+    for region in dest_regions {
+        if Some(region.as_str()) == source_region {
+            bail!(
+                "目标区域 {} 与源区域相同 —— 同区复制不产生跨区流量费,烧钱引擎无效",
+                region
+            );
+        }
+        if seen.contains(&region.as_str()) {
+            bail!("目标区域 {} 重复 —— 同一区域只会计一次流量费", region);
+        }
+        seen.push(region);
+    }
+    Ok(())
+}
+
 /// One-shot idempotent CRR setup across K destination regions: versioning on
 /// every bucket, one destination bucket per region, one replication IAM role
 /// covering them all, and one rule per destination scoped to the tool prefix.
@@ -147,22 +174,7 @@ pub async fn setup(
     dest_regions: &[String],
     key_prefix: &str,
 ) -> Result<Vec<String>> {
-    if dest_regions.is_empty() {
-        bail!("至少要指定一个复制目标区域");
-    }
-    let mut seen: Vec<&str> = Vec::new();
-    for region in dest_regions {
-        if region == source_region {
-            bail!(
-                "目标区域 {} 与源区域相同 —— 同区复制不产生跨区流量费,烧钱引擎无效",
-                region
-            );
-        }
-        if seen.contains(&region.as_str()) {
-            bail!("目标区域 {} 重复 —— 同一区域只会计一次流量费", region);
-        }
-        seen.push(region);
-    }
+    validate_dest_regions(Some(source_region), dest_regions)?;
 
     // 1. versioning on source
     ensure_versioning(source_client, source_bucket).await?;
@@ -171,11 +183,7 @@ pub async fn setup(
     let mut dest_buckets: Vec<String> = Vec::with_capacity(dest_regions.len());
     for dest_region in dest_regions {
         let dest_bucket = dest_bucket_name(source_bucket, dest_region);
-        let dest_client = {
-            let builder = aws_sdk_s3::config::Builder::from(shared)
-                .region(aws_config::Region::new(dest_region.to_string()));
-            aws_sdk_s3::Client::from_conf(builder.build())
-        };
+        let dest_client = retrying_region_client(shared, dest_region);
         match dest_client.head_bucket().bucket(&dest_bucket).send().await {
             Ok(_) => println!("{} 目标桶 {} 已存在({})", "✓".green(), dest_bucket, dest_region),
             Err(_) => {
@@ -254,6 +262,95 @@ pub async fn setup(
         }
     }
     bail!("写入复制规则失败: {}", last_err.unwrap())
+}
+
+/// A destination bucket found by asking the account rather than by reading the
+/// source bucket's replication rules.
+pub struct OrphanDest {
+    pub bucket: String,
+    pub region: String,
+}
+
+/// Destination buckets of this source that exist in the account but no
+/// replication rule points at — what a half-finished teardown leaves behind
+/// (deleting the rules succeeds, deleting a bucket fails, and the survivors
+/// bill storage in that region forever).
+///
+/// Asked of the account rather than derived from a region list: destinations are
+/// drawn at random, so their names can no longer be guessed, and a list would go
+/// stale the moment the pool changes. `ListBuckets` filters by name prefix
+/// server-side and already carries each bucket's region.
+///
+/// Only buckets carrying our created tag are returned. The name is derived from
+/// the source bucket, so colliding with one the user already owned is entirely
+/// possible, and nothing discovered this way should reach a deletion list on the
+/// strength of its name alone.
+pub async fn find_orphan_dests(
+    shared: &SdkConfig,
+    source_client: &aws_sdk_s3::Client,
+    source_bucket: &str,
+    known: &[String],
+) -> Result<Vec<OrphanDest>> {
+    let prefix = dest_bucket_prefix(source_bucket);
+    let mut found = Vec::new();
+    let mut token: Option<String> = None;
+    loop {
+        let out = source_client
+            .list_buckets()
+            .prefix(&prefix)
+            .set_continuation_token(token)
+            .send()
+            .await
+            .context("列举账号下的桶失败(需要 s3:ListAllMyBuckets 权限)")?;
+        for listed in out.buckets() {
+            if let Some(orphan) = orphan_dest_of(shared, source_bucket, known, listed).await {
+                found.push(orphan);
+            }
+        }
+        let Some(next) = out.continuation_token().filter(|t| !t.is_empty()) else {
+            return Ok(found);
+        };
+        token = Some(next.to_string());
+    }
+}
+
+/// Is this account-listed bucket a destination of `source_bucket` that no
+/// replication rule points at any more? `None` for anything that fails a check:
+/// no name, still named by a rule, a name that does not round-trip, or missing
+/// our created tag.
+async fn orphan_dest_of(
+    shared: &SdkConfig,
+    source_bucket: &str,
+    known: &[String],
+    listed: &aws_sdk_s3::types::Bucket,
+) -> Option<OrphanDest> {
+    let name = listed.name()?;
+    if known.iter().any(|k| k == name) {
+        return None;
+    }
+    let claimed_region = dest_region_of(source_bucket, name)?;
+    // ListBuckets reports where the bucket really is; the name only claims it.
+    let actual_region = listed.bucket_region().unwrap_or(&claimed_region).to_string();
+    // Bucket tags are readable only in the bucket's own region.
+    let dest_client = retrying_region_client(shared, &actual_region);
+    if !was_created_by_us(&dest_client, name).await {
+        return None;
+    }
+    Some(OrphanDest {
+        bucket: name.to_string(),
+        region: actual_region,
+    })
+}
+
+/// A region-pinned client that KEEPS the SDK's default retries, unlike
+/// `client::build_s3_client`, which disables them so the burn loop can account
+/// for every request exactly. Provisioning and discovery are one-shot slow-path
+/// control-plane calls with no retry layer of their own: a retried CreateBucket
+/// is strictly better than a replication target that failed to appear.
+fn retrying_region_client(shared: &SdkConfig, region: &str) -> aws_sdk_s3::Client {
+    let builder = aws_sdk_s3::config::Builder::from(shared)
+        .region(aws_config::Region::new(region.to_string()));
+    aws_sdk_s3::Client::from_conf(builder.build())
 }
 
 /// One destination bucket a teardown would remove.
@@ -480,11 +577,62 @@ async fn was_created_by_us(client: &aws_sdk_s3::Client, bucket: &str) -> bool {
     }
 }
 
-fn dest_bucket_name(source_bucket: &str, dest_region: &str) -> String {
+/// The destination bucket for one region. Derived from the source name rather
+/// than random, so it is the same on every run and stays inside the 63-char
+/// bucket limit.
+pub fn dest_bucket_name(source_bucket: &str, dest_region: &str) -> String {
     let suffix = format!("-crr-{}", dest_region);
     let max_src = 63usize.saturating_sub(suffix.len());
     let src = &source_bucket[..source_bucket.len().min(max_src)];
     format!("{}{}", src.trim_end_matches('-'), suffix)
+}
+
+/// Bytes reserved for the region name inside a destination suffix. Deliberately
+/// wider than any region in service (`ap-northeast-1` is 14, `us-isof-south-1`
+/// is 15): the errors are not symmetric. A budget that is too generous only
+/// shortens the prefix, returning a few extra buckets that the round-trip check
+/// then rejects — while one byte too tight drops a real orphan out of the
+/// listing entirely, which is the exact leak `find_orphan_dests` exists to close.
+pub(crate) const REGION_LEN_BUDGET: usize = 24;
+
+/// The bucket-name prefix EVERY destination of this source starts with,
+/// whichever region it landed in. `dest_bucket_name` truncates the source name
+/// by the length of each region's suffix, so the longest suffix leaves the
+/// shortest head — and only that head is a prefix of all the others.
+pub fn dest_bucket_prefix(source_bucket: &str) -> String {
+    let max_src = 63usize.saturating_sub(REGION_LEN_BUDGET + "-crr-".len());
+    source_bucket[..source_bucket.len().min(max_src)]
+        .trim_end_matches('-')
+        .to_string()
+}
+
+/// Read a destination bucket back: which region does this name claim, and is it
+/// really a destination of `source_bucket`?
+///
+/// Round-tripping through `dest_bucket_name` is what makes the answer safe to
+/// act on — a bucket that merely happens to contain "-crr-" does not reproduce,
+/// and teardown must never delete a bucket on a name coincidence.
+pub fn dest_region_of(source_bucket: &str, bucket: &str) -> Option<String> {
+    let (_, region) = bucket.rsplit_once("-crr-")?;
+    if !looks_like_region(region) || dest_bucket_name(source_bucket, region) != bucket {
+        return None;
+    }
+    Some(region.to_string())
+}
+
+/// `us-east-1`, `ap-northeast-1`, … — two letters, one or more words, a digit.
+/// Cheap shape check so a user bucket that merely ends in "-crr-something" does
+/// not read as one of ours before the tag is even consulted.
+fn looks_like_region(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('-').collect();
+    parts.len() >= 3
+        && parts[0].len() == 2
+        && parts[0].bytes().all(|b| b.is_ascii_lowercase())
+        && parts[1..parts.len() - 1]
+            .iter()
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_lowercase()))
+        && parts[parts.len() - 1].bytes().all(|b| b.is_ascii_digit())
+        && !parts[parts.len() - 1].is_empty()
 }
 
 /// One role for the whole fan-out: the write statement must list EVERY
@@ -632,5 +780,115 @@ mod tests {
         let name = dest_bucket_name(&"b".repeat(80), "ap-northeast-1");
         assert!(name.len() <= 63, "{} ({})", name, name.len());
         assert!(name.ends_with("-crr-ap-northeast-1"));
+    }
+
+    /// Orphan discovery reads the region back OUT of the bucket name, so the
+    /// round trip has to hold for every region the pool can produce — including
+    /// the long ones, where the source name gets truncated.
+    #[test]
+    fn dest_name_round_trips_to_its_region() {
+        for source in ["burn", "my-burn-bucket", &"b".repeat(80)] {
+            for region in ["us-east-1", "ap-northeast-1", "ca-central-1", "sa-east-1"] {
+                let name = dest_bucket_name(source, region);
+                assert_eq!(
+                    dest_region_of(source, &name).as_deref(),
+                    Some(region),
+                    "{} / {}",
+                    source,
+                    region
+                );
+            }
+        }
+    }
+
+    /// Teardown deletes what this identifies, so a bucket that merely looks the
+    /// part must not round-trip. The name is derived from the source bucket,
+    /// which makes collisions with a user's own bucket entirely possible.
+    #[test]
+    fn a_name_that_is_not_ours_does_not_round_trip() {
+        // Belongs to a different source bucket
+        assert!(dest_region_of("burn", "other-crr-us-east-1").is_none());
+        // "-crr-" followed by something that is not a region
+        assert!(dest_region_of("burn", "burn-crr-archive").is_none());
+        assert!(dest_region_of("burn", "burn-crr-us-east").is_none());
+        assert!(dest_region_of("burn", "burn-crr-backup-1").is_none());
+        // No marker at all
+        assert!(dest_region_of("burn", "burn-us-east-1").is_none());
+        // A source whose own name contains the marker still resolves correctly
+        assert_eq!(
+            dest_region_of("my-crr-bucket", "my-crr-bucket-crr-eu-west-2").as_deref(),
+            Some("eu-west-2")
+        );
+    }
+
+    /// The ListBuckets filter has to match every destination of this source,
+    /// whichever region it landed in. A prefix one byte too long drops that
+    /// bucket out of the listing entirely and the orphan is never found again —
+    /// so this walks the whole pool plus region names longer than any in
+    /// service, at the source lengths where truncation actually bites.
+    #[test]
+    fn dest_prefix_matches_every_region_variant() {
+        let long_names = [
+            "us-isof-south-1",              // 15, in service today
+            &"a".repeat(REGION_LEN_BUDGET), // the widest the budget allows
+        ];
+        let regions: Vec<&str> = crate::s3::modes::crr::DEST_POOL
+            .iter()
+            .copied()
+            .chain(long_names.iter().copied())
+            .collect();
+        for source in ["burn", "my-burn-bucket", &"b".repeat(45), &"b".repeat(80), &"c".repeat(50)] {
+            let prefix = dest_bucket_prefix(source);
+            for region in &regions {
+                let name = dest_bucket_name(source, region);
+                assert!(
+                    name.starts_with(&prefix),
+                    "{} 不以 {} 开头(source={}, region={})",
+                    name,
+                    prefix,
+                    source,
+                    region
+                );
+            }
+        }
+    }
+
+    /// This gate has to be reachable WITHOUT running `setup`, because a
+    /// `--dry-run` bills the fan-out without ever creating it: if the check
+    /// lived only inside `setup`, a rehearsal would happily price a fan-out the
+    /// real run refuses to build.
+    #[test]
+    fn a_fanout_the_real_run_would_refuse_never_passes_the_gate() {
+        let ok = vec!["us-west-2".to_string(), "eu-west-1".to_string()];
+        assert!(validate_dest_regions(Some("us-east-1"), &ok).is_ok());
+
+        // Same region as the source: no cross-region traffic, no burn.
+        let same = vec!["us-west-2".to_string(), "us-east-1".to_string()];
+        assert!(validate_dest_regions(Some("us-east-1"), &same).is_err());
+
+        // A repeat is billed once, so counting it twice over-promises the burn.
+        let dup = vec!["us-west-2".to_string(), "us-west-2".to_string()];
+        assert!(validate_dest_regions(Some("us-east-1"), &dup).is_err());
+
+        // Nothing to replicate to at all.
+        assert!(validate_dest_regions(Some("us-east-1"), &[]).is_err());
+
+        // A rehearsal may not know the source region; the duplicate check still
+        // applies, and the same-region one simply cannot fire.
+        assert!(validate_dest_regions(None, &dup).is_err());
+        assert!(validate_dest_regions(None, &same).is_ok());
+    }
+
+    /// The budget is only honoured if every region the tool can pick fits in it.
+    #[test]
+    fn every_pool_region_fits_the_budget() {
+        for region in crate::s3::modes::crr::DEST_POOL {
+            assert!(
+                region.len() <= REGION_LEN_BUDGET,
+                "{} 超出 REGION_LEN_BUDGET({})",
+                region,
+                REGION_LEN_BUDGET
+            );
+        }
     }
 }
