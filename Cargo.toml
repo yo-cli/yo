@@ -1,6 +1,6 @@
 [package]
 name = "yo"
-version = "1.1.71"
+version = "1.1.72"
 edition = "2021"
 authors = ["Your Name <you@example.com>"]
 description = "A multi-functional command-line tool with GitHub SSH key management and SOCKS5 proxy"
@@ -54,6 +54,8 @@ block-padding = "0.3"
 colored = "3.1.1"
 # Regex support
 regex = "1.11.3"
+# CSV parsing (yo-file email)
+csv = "1"
 # Error handling
 anyhow = "1.0"
 thiserror = "2.0"

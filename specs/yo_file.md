@@ -1,16 +1,16 @@
 # yo-file 产品需求规格
 
-> 只写代码说不出来的东西：定位、设计取舍、做不到的。命令行为看 `yo-file --help` 与 `src/commands/clone_command.rs`。
+> 只写代码说不出来的东西：定位、设计取舍、做不到的。命令行为看 `yo-file --help` 与 `src/commands/clone_command.rs`、`src/commands/email_command.rs`。
 
 ---
 
 ## 1. 产品定位
 
-**yo-file 是一个模板克隆工具。**
+**yo-file 是一组文件工具：模板克隆（clone）+ 从 CSV 提取邮箱（email）。**
 
-目标用户是经常需要从现有项目/模块复制出新项目/模块的开发者。直接复制目录后手动查找替换命名很容易遗漏，尤其是当同一个关键词以不同命名风格出现时（kebab-case、snake_case、PascalCase、camelCase、SCREAMING_SNAKE_CASE）。yo-file 自动识别所有命名变体并一次性全部替换。
+clone 的目标用户是经常需要从现有项目/模块复制出新项目/模块的开发者。直接复制目录后手动查找替换命名很容易遗漏，尤其是当同一个关键词以不同命名风格出现时（kebab-case、snake_case、PascalCase、camelCase、SCREAMING_SNAKE_CASE）。yo-file 自动识别所有命名变体并一次性全部替换。
 
-核心理念：**复制一个模块，改个名字就能用。**
+clone 的核心理念：**复制一个模块，改个名字就能用。**
 
 ---
 
@@ -28,5 +28,5 @@
 
 ## 3. 当前已知限制
 
-- **仅支持 clone 子命令：** 文件工具目前只有克隆功能，未来可扩展其他文件操作
 - **不支持正则自定义：** 替换规则固定为 5 种命名变体，不支持用户自定义模式
+- **email 只认 ASCII 邮箱：** 国际化邮箱（如 `用户@例子.中国`）不会被提取

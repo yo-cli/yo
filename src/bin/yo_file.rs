@@ -1,8 +1,8 @@
-// yo-file: File utilities (template cloning, etc.)
+// yo-file: File utilities (template cloning, CSV email extraction)
 
 use colored::Colorize;
 use std::env;
-use yo_lib::commands::CloneCommand;
+use yo_lib::commands::{CloneCommand, EmailCommand};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -16,6 +16,7 @@ fn show_usage() {
     println!("  -v, --version          Show version information");
     println!("Commands:");
     println!("  clone                  Clone template with keyword replacement");
+    println!("  email [PATH...]        Collect emails from CSVs into emails.txt (default: all CSVs here)");
 }
 
 fn main() {
@@ -44,6 +45,15 @@ fn main() {
     // clone
     if arg1 == "clone" {
         if let Err(e) = CloneCommand::execute() {
+            println!("{}", format!("✗ {}", e).red().bold());
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    // email [PATH...]
+    if arg1 == "email" {
+        if let Err(e) = EmailCommand::execute(&args[2..]) {
             println!("{}", format!("✗ {}", e).red().bold());
             std::process::exit(1);
         }
