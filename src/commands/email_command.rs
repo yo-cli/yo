@@ -6,10 +6,11 @@
 // email column, several, or addresses buried in free text.
 
 use colored::Colorize;
+use indicatif::{ProgressBar, ProgressStyle};
 use regex::bytes::Regex;
 use std::collections::HashSet;
-use std::fs;
-use std::io;
+use std::fs::{self, File};
+use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -81,18 +82,8 @@ impl EmailCommand {
 
         let mut merged_emails = MergedEmails::default();
         for csv_path in &csv_paths {
-            let shown_path = csv_path.display().to_string();
-            let file_bytes = fs::read(csv_path).map_err(|source| EmailError::ReadFailed {
-                path: shown_path.clone(),
-                source,
-            })?;
-            let csv_stats = extract(&transcode_utf16(file_bytes), &mut merged_emails).map_err(|source| {
-                EmailError::ParseFailed {
-                    path: shown_path.clone(),
-                    source,
-                }
-            })?;
-            Self::print_csv_summary(&shown_path, &csv_stats);
+            let csv_stats = read_csv(csv_path, &mut merged_emails)?;
+            Self::print_csv_summary(csv_path, &csv_stats);
         }
         println!();
 
@@ -137,15 +128,15 @@ impl EmailCommand {
         Ok(csv_paths)
     }
 
-    fn print_csv_summary(shown_path: &str, csv_stats: &CsvStats) {
+    fn print_csv_summary(csv_path: &Path, csv_stats: &CsvStats) {
         if csv_stats.emails == 0 {
-            println!("  {} {}: no email in {}", "⚠".yellow(), shown_path, plural(csv_stats.rows, "row"));
+            println!("  {} {}: no email in {}", "⚠".yellow(), csv_path.display(), plural(csv_stats.rows, "row"));
             return;
         }
         println!(
             "  {} {}: {} in {}",
             "✓".green(),
-            shown_path,
+            csv_path.display(),
             plural(csv_stats.emails, "email").cyan(),
             plural(csv_stats.rows, "row"),
         );
@@ -205,23 +196,55 @@ fn csv_files_in(dir: &Path) -> Result<Vec<PathBuf>, EmailError> {
     Ok(csv_paths)
 }
 
-/// UTF-16 (recognized by its BOM, as Windows tools write it) is transcoded to
-/// UTF-8 so the ASCII pattern can see the addresses. Every other encoding the
-/// pattern already reads as-is.
-fn transcode_utf16(file_bytes: Vec<u8>) -> Vec<u8> {
-    let little_endian = match file_bytes.get(..2) {
-        Some([0xFF, 0xFE]) => true,
-        Some([0xFE, 0xFF]) => false,
-        _ => return file_bytes,
+/// Streams one CSV into `merged_emails`, so memory stays flat however big the
+/// file is. UTF-16 is the exception: it is transcoded in memory first.
+fn read_csv(csv_path: &Path, merged_emails: &mut MergedEmails) -> Result<CsvStats, EmailError> {
+    let shown_path = csv_path.display().to_string();
+    let read_failed = |source| EmailError::ReadFailed {
+        path: shown_path.clone(),
+        source,
     };
-    let code_units = file_bytes[2..].chunks_exact(2).map(|pair| {
-        let pair = [pair[0], pair[1]];
-        if little_endian {
-            u16::from_le_bytes(pair)
-        } else {
-            u16::from_be_bytes(pair)
+    let csv_file = File::open(csv_path).map_err(read_failed)?;
+    let file_size = csv_file.metadata().map_err(read_failed)?.len();
+
+    // A multi-GB export takes minutes; the bar shows it is still moving.
+    let progress_bar = ProgressBar::new(file_size).with_message(shown_path.clone());
+    progress_bar.set_style(
+        ProgressStyle::with_template("  {msg} [{bar:30.cyan/blue}] {bytes}/{total_bytes} {eta}")
+            .unwrap()
+            .progress_chars("=>-"),
+    );
+    let mut csv_reader = BufReader::new(progress_bar.wrap_read(csv_file));
+    let csv_stats = match utf16_decoder(csv_reader.fill_buf().map_err(read_failed)?) {
+        Some(decode_unit) => {
+            let mut file_bytes = Vec::new();
+            csv_reader.read_to_end(&mut file_bytes).map_err(read_failed)?;
+            extract(utf16_to_utf8(&file_bytes, decode_unit).as_slice(), merged_emails)
         }
-    });
+        None => extract(csv_reader, merged_emails),
+    };
+    progress_bar.finish_and_clear();
+    csv_stats.map_err(|source| EmailError::ParseFailed { path: shown_path, source })
+}
+
+/// The code-unit decoder a UTF-16 BOM at the start of `head` calls for, if
+/// there is one (Windows tools write it). Everything else is ASCII-compatible,
+/// which the pattern reads as-is.
+fn utf16_decoder(head: &[u8]) -> Option<fn([u8; 2]) -> u16> {
+    match head.get(..2) {
+        Some([0xFF, 0xFE]) => Some(u16::from_le_bytes),
+        Some([0xFE, 0xFF]) => Some(u16::from_be_bytes),
+        _ => None,
+    }
+}
+
+/// Re-encodes a whole UTF-16 file, BOM included, as UTF-8.
+fn utf16_to_utf8(file_bytes: &[u8], decode_unit: fn([u8; 2]) -> u16) -> Vec<u8> {
+    let code_units = file_bytes
+        .get(2..)
+        .unwrap_or_default()
+        .chunks_exact(2)
+        .map(|pair| decode_unit([pair[0], pair[1]]));
     char::decode_utf16(code_units)
         .map(|decoded| decoded.unwrap_or(char::REPLACEMENT_CHARACTER))
         .collect::<String>()
@@ -231,12 +254,12 @@ fn transcode_utf16(file_bytes: Vec<u8>) -> Vec<u8> {
 /// Reads one CSV into `merged_emails`. Fields are raw bytes (any
 /// ASCII-compatible encoding works), and `flexible` tolerates the ragged rows
 /// that spreadsheet exports often have.
-fn extract(csv_bytes: &[u8], merged_emails: &mut MergedEmails) -> Result<CsvStats, csv::Error> {
+fn extract<R: Read>(input: R, merged_emails: &mut MergedEmails) -> Result<CsvStats, csv::Error> {
     let email_regex = Regex::new(EMAIL_PATTERN).expect("EMAIL_PATTERN is a valid regex");
     let mut csv_reader = csv::ReaderBuilder::new()
         .has_headers(false) // a header-less file must not lose its first address
         .flexible(true)
-        .from_reader(csv_bytes);
+        .from_reader(input);
 
     let mut csv_stats = CsvStats::default();
     for byte_record in csv_reader.byte_records() {
@@ -351,8 +374,8 @@ mod tests {
     #[test]
     fn files_merge_in_read_order_and_repeats_across_files_drop() {
         let mut merged_emails = MergedEmails::default();
-        extract(b"alice@example.com\nbob@example.org\n", &mut merged_emails).unwrap();
-        let second_stats = extract(b"BOB@example.org\ncarol@example.net\n", &mut merged_emails).unwrap();
+        extract(b"alice@example.com\nbob@example.org\n".as_slice(), &mut merged_emails).unwrap();
+        let second_stats = extract(b"BOB@example.org\ncarol@example.net\n".as_slice(), &mut merged_emails).unwrap();
         assert_eq!(merged_emails.emails, ["alice@example.com", "bob@example.org", "carol@example.net"]);
         assert_eq!(merged_emails.duplicates, 1);
         assert_eq!(second_stats.emails, 2);
@@ -390,16 +413,38 @@ mod tests {
             big_endian.extend(code_unit.to_be_bytes());
         }
         for utf16_bytes in [little_endian, big_endian] {
-            let (merged_emails, csv_stats) = run(&transcode_utf16(utf16_bytes));
-            assert_eq!(merged_emails.emails, ["zhangsan@example.cn"]);
-            assert_eq!(csv_stats.rows, 2);
+            let decode_unit = utf16_decoder(&utf16_bytes).expect("the BOM is recognized");
+            assert_eq!(utf16_to_utf8(&utf16_bytes, decode_unit), text.as_bytes());
         }
     }
 
     #[test]
-    fn bytes_without_utf16_bom_pass_through() {
-        let gbk_bytes = b"\xd3\xca\xcf\xe4\xa3\xbaalice@example.com\n".to_vec();
-        assert_eq!(transcode_utf16(gbk_bytes.clone()), gbk_bytes);
+    fn other_encodings_are_not_mistaken_for_utf16() {
+        assert!(utf16_decoder(b"\xd3\xca\xcf\xe4\xa3\xbaalice@example.com\n").is_none()); // GBK
+        assert!(utf16_decoder("\u{feff}name,email\n".as_bytes()).is_none()); // UTF-8 with BOM
+        assert!(utf16_decoder(b"").is_none());
+    }
+
+    #[test]
+    fn read_csv_streams_plain_files_and_transcodes_utf16_ones() {
+        let dir = tmp_dir("read");
+        fs::write(dir.join("plain.csv"), "name,email\nAlice,alice@example.com\n").unwrap();
+        let mut utf16_bytes = vec![0xFF, 0xFE];
+        for code_unit in "name\temail\r\nWang\twang@example.com\r\n".encode_utf16() {
+            utf16_bytes.extend(code_unit.to_le_bytes());
+        }
+        fs::write(dir.join("wide.csv"), utf16_bytes).unwrap();
+
+        let mut merged_emails = MergedEmails::default();
+        let plain_stats = read_csv(&dir.join("plain.csv"), &mut merged_emails).unwrap();
+        let wide_stats = read_csv(&dir.join("wide.csv"), &mut merged_emails).unwrap();
+        assert_eq!(merged_emails.emails, ["alice@example.com", "wang@example.com"]);
+        assert_eq!((plain_stats.rows, wide_stats.rows), (2, 2));
+        assert!(matches!(
+            read_csv(&dir.join("missing.csv"), &mut merged_emails),
+            Err(EmailError::ReadFailed { .. })
+        ));
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

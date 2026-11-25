@@ -273,10 +273,13 @@ jobs:
             curl -fsSL -o yo-s3 https://github.com/${{ github.repository }}/releases/download/v${{ needs.check-version.outputs.version }}/yo-s3 && chmod +x yo-s3
             ```
 
-            **Windows Git Bash (download as `yo.exe`, `~/bin` is always on PATH in Git Bash):**
+            **Windows Git Bash (`~/bin` is always on PATH in Git Bash):**
             ```bash
-            # yo-git (uploaded from local cross-compile a few minutes after release)
+            # yo-git, installed as `yo` (uploaded from local cross-compile a few minutes after release)
             mkdir -p ~/bin && curl -fsSL -o ~/bin/yo.exe https://github.com/${{ github.repository }}/releases/download/v${{ needs.check-version.outputs.version }}/yo-git.exe
+
+            # yo-file (File utilities, uploaded together with yo-git.exe)
+            mkdir -p ~/bin && curl -fsSL -o ~/bin/yo-file.exe https://github.com/${{ github.repository }}/releases/download/v${{ needs.check-version.outputs.version }}/yo-file.exe
             ```
 
             ---
